@@ -2137,6 +2137,15 @@ typedef struct {
 
     /* List of u-plane frames (corresponding_uplane_frame*) corresponding to a c-plane frame */
     wmem_list_t *u_plane_frames;
+
+    /* Whether a C-plane flow had been seen when a u-plane frame was first seen */
+    bool     cplane_seen;
+
+    /* UL udCompHdr settings from the C-plane when a UL u-plane frame was first seen */
+    bool     ul_ud_comp_hdr_set;
+    unsigned ul_ud_comp_hdr_bit_width;
+    int      ul_ud_comp_hdr_compression;
+    unsigned ul_ud_comp_hdr_frame;
 } flow_result_t;
 
 
@@ -6858,7 +6867,7 @@ static int dissect_oran_c(tvbuff_t *tvb, packet_info *pinfo,
     };
 
     /* Update udCompHdr details in state for UL U-Plane */
-    if (state && direction==0) {
+    if (state && direction==0 && !PINFO_FD_VISITED(pinfo)) {
         switch (sectionType) {
             case SEC_C_NORMAL:    /* Section Type 1 */
             case SEC_C_PRACH:     /* Section Type 3 */
@@ -7754,12 +7763,12 @@ static int dissect_oran_u_section_header(tvbuff_t *tvb, packet_info *pinfo, unsi
 
     /* Lookup corresponding C-plane frame/info */
     if (link_planes_together) {
-        if (cplane_state != NULL && result) {
+        if (result && result->cplane_seen) {
 
             expected_section_data_t *section_data = NULL;
             section_data = wmem_tree_lookup32(result->expected_sections, *sectionIdPtr);
 
-            if (!section_data && !PINFO_FD_VISITED(pinfo)) {
+            if (!section_data && !PINFO_FD_VISITED(pinfo) && cplane_state) {
                 /* Take a deep-copy of the C-plane state for this sectionId on first pass */
                 expected_section_data_t *cplane_data = wmem_tree_lookup32(cplane_state->expected_sections[direction],
                                                                           *sectionIdPtr);
@@ -7970,7 +7979,7 @@ static int dissect_oran_u_section(tvbuff_t *tvb, packet_info *pinfo, unsigned of
         /* Point back to C-Plane, if used */
         /* TODO: doesn't work with multiple port mappings using SE10.. */
         if (ud_cmp_hdr_cplane) {
-            proto_item *cplane_ti = proto_tree_add_uint(section_tree, hf_oran_ul_cplane_ud_comp_hdr_frame, tvb, offset, 0, cplane_state->ul_ud_comp_hdr_frame);
+            proto_item *cplane_ti = proto_tree_add_uint(section_tree, hf_oran_ul_cplane_ud_comp_hdr_frame, tvb, offset, 0, result->ul_ud_comp_hdr_frame);
             proto_item_set_generated(cplane_ti);
         }
 
@@ -8380,7 +8389,8 @@ dissect_oran_u(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                                                                                   tvb, offset, 0, "", "Section");
                         proto_tree *section_tree = proto_item_add_subtree(sectionHeading, ett_oran_u_section);
 
-                        offset = dissect_oran_u_section_header(original_tvb, pinfo, offset, section_tree, tap_info, result, NULL,
+                        /* No C-plane linking for a partial decode */
+                        offset = dissect_oran_u_section_header(original_tvb, pinfo, offset, section_tree, tap_info, NULL, NULL,
                                                                frameId, subframeId, slotId, symbolId, direction, &sectionId, &rb,
                                                                &startPrbu, &numPrbu, &section_details);
                     }
@@ -8416,6 +8426,7 @@ dissect_oran_u(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         result = wmem_new0(wmem_file_scope(), flow_result_t);
         result->expected_sections = wmem_tree_new(wmem_file_scope());
         result->u_plane_frames = wmem_list_new(wmem_file_scope());
+        result->cplane_seen = (cplane_state != NULL);
 
         wmem_tree_insert32(flow_results_table, pinfo->num, result);
 
@@ -8540,11 +8551,18 @@ dissect_oran_u(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 
     /* If uplink, load any udCompHdr settings written by C-Plane */
     bool ud_cmp_hdr_cplane = false;
-    if (cplane_state && direction == 0) {
+    if (result && direction == 0) {
+        /* On first pass, keep the settings the C-Plane has written so far */
+        if (!PINFO_FD_VISITED(pinfo) && cplane_state && cplane_state->ul_ud_comp_hdr_set) {
+            result->ul_ud_comp_hdr_set = true;
+            result->ul_ud_comp_hdr_bit_width = cplane_state->ul_ud_comp_hdr_bit_width;
+            result->ul_ud_comp_hdr_compression = cplane_state->ul_ud_comp_hdr_compression;
+            result->ul_ud_comp_hdr_frame = cplane_state->ul_ud_comp_hdr_frame;
+        }
         /* Initialise settings from udpCompHdr from C-Plane */
-        if (cplane_state->ul_ud_comp_hdr_set && !pref_override_ul_compression) {
-            sample_bit_width = cplane_state->ul_ud_comp_hdr_bit_width;
-            compression =      cplane_state->ul_ud_comp_hdr_compression;
+        if (result->ul_ud_comp_hdr_set && !pref_override_ul_compression) {
+            sample_bit_width = result->ul_ud_comp_hdr_bit_width;
+            compression =      result->ul_ud_comp_hdr_compression;
             ud_cmp_hdr_cplane = true;
         }
     }
