@@ -1,0 +1,6 @@
+project: savantenvs/wireshark
+target: fuzzshark_udp_port-dns
+cmds:
+  - cmd: /mayhem/fuzzshark_udp_port-dns
+    libfuzzer: true
+    timeout: 10
