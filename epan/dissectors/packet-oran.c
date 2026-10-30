@@ -6386,6 +6386,23 @@ static void dissect_payload_version(proto_tree *tree, tvbuff_t *tvb, packet_info
     }
 }
 
+/* Time from earlier to later in units of unit_ns nanoseconds, rounded.
+   0 if later is before earlier, and at most UINT32_MAX */
+static uint32_t time_gap(const nstime_t *later, const nstime_t *earlier, uint32_t unit_ns)
+{
+    nstime_t delta;
+    nstime_delta(&delta, later, earlier);
+    if (delta.secs < 0 || (delta.secs == 0 && delta.nsecs < 0)) {
+        return 0;
+    }
+    if (delta.secs >= UINT32_MAX) {
+        return UINT32_MAX;
+    }
+    uint64_t units = ((uint64_t)delta.secs * (1000000000 / unit_ns)) +
+                     (((uint64_t)delta.nsecs + unit_ns/2) / unit_ns);
+    return (uint32_t)MIN(units, UINT32_MAX);
+}
+
 static void show_link_to_acknack_request(proto_tree *tree, tvbuff_t *tvb, packet_info *pinfo,
                                          ack_nack_request_t *request)
 {
@@ -6395,13 +6412,7 @@ static void show_link_to_acknack_request(proto_tree *tree, tvbuff_t *tvb, packet
     PROTO_ITEM_SET_GENERATED(ti);
 
     /* Work out gap between frames (in ms) */
-    int seconds_between_packets = (int)
-          (pinfo->abs_ts.secs - request->request_frame_time.secs);
-    int nseconds_between_packets =
-          pinfo->abs_ts.nsecs - request->request_frame_time.nsecs;
-
-    int total_gap = (seconds_between_packets*1000) +
-                     ((nseconds_between_packets+500000) / 1000000);
+    uint32_t total_gap = time_gap(&pinfo->abs_ts, &request->request_frame_time, 1000000);
 
     ti = proto_tree_add_uint(tree, hf_oran_acknack_request_time,
                              tvb, 0, 0, total_gap);
@@ -6427,13 +6438,7 @@ static void show_link_to_acknack_response(proto_tree *tree, tvbuff_t *tvb, packe
     PROTO_ITEM_SET_GENERATED(ti);
 
     /* Work out gap between frames (in ms) */
-    int seconds_between_packets = (int)
-          (response->response_frame_time.secs - pinfo->abs_ts.secs);
-    int nseconds_between_packets =
-          response->response_frame_time.nsecs - pinfo->abs_ts.nsecs;
-
-    int total_gap = (seconds_between_packets*1000) +
-                     ((nseconds_between_packets+500000) / 1000000);
+    uint32_t total_gap = time_gap(&response->response_frame_time, &pinfo->abs_ts, 1000000);
 
     ti = proto_tree_add_uint(tree, hf_oran_acknack_response_time,
                              tvb, 0, 0, total_gap);
@@ -8491,14 +8496,7 @@ dissect_oran_u(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
             if (timing) {  /* Really shouldn't fail! */
                 if (timing->frames_seen_in_symbol > 1) {
                     /* Work out gap between frames (in microseconds) back to frame carrying first seen symbol */
-                    int seconds_between_packets = (int)
-                          (pinfo->abs_ts.secs - timing->first_frame_time.secs);
-                    int nseconds_between_packets =
-                          pinfo->abs_ts.nsecs - timing->first_frame_time.nsecs;
-
-                    /* Round to nearest microsecond. */
-                    uint32_t total_gap = (seconds_between_packets*1000000) +
-                                         ((nseconds_between_packets+500) / 1000);
+                    uint32_t total_gap = time_gap(&pinfo->abs_ts, &timing->first_frame_time, 1000);
 
                     /* Show how long it has been */
                     proto_item *ti = NULL;
