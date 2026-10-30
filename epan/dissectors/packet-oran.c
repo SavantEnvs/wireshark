@@ -2466,8 +2466,9 @@ static int dissect_active_beamspace_coefficient_mask(tvbuff_t *tvb, proto_tree *
                                           ENC_BIG_ENDIAN, &val);
         offset++;
         /* Add up the set bits for this byte (but be careful not to count beyond last real K bit..) */
+        /* N1 is the most significant bit */
         for (unsigned b=0; b < 8; b++) {
-            if ((1 << b) & (unsigned)val) {
+            if ((0x80 >> b) & (unsigned)val) {
                 if (((n*8)+b) < pref_num_bf_antennas) {
                     if (*num_trx_entries < 1024-1) {   /* Don't write beyond array (which should be plenty big) */
                         trx_enabled[(*num_trx_entries)++] = (n*8) + b + 1;
