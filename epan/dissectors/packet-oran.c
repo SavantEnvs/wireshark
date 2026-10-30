@@ -7025,6 +7025,16 @@ static int dissect_oran_c(tvbuff_t *tvb, packet_info *pinfo,
 
                     /* Read beam entries until reach end of command length */
                     while ((offset - command_start_offset) < (st4_cmd_len * 4)) {
+                        /* Stop at the padding (fewer than 4 zero bytes) at the end of the command.
+                           An entry with BFWs does not fit there. */
+                        unsigned remaining = command_start_offset + (st4_cmd_len * 4) - offset;
+                        bool padding = (remaining < 4);
+                        for (unsigned b=0; padding && b < remaining; b++) {
+                            padding = (tvb_get_uint8(tvb, offset+b) == 0);
+                        }
+                        if (padding) {
+                            break;
+                        }
 
                         /* disableTDBFWs (1 bit) */
                         bool disable_tdbfws;
