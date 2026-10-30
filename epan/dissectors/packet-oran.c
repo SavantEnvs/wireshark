@@ -6742,6 +6742,12 @@ static int dissect_oran_c(tvbuff_t *tvb, packet_info *pinfo,
             proto_tree_add_item_ret_uint(section_tree, hf_oran_number_of_nacks, tvb, offset, 1, ENC_BIG_ENDIAN, &number_of_nacks);
             offset += 1;
 
+            /* The requests were sent by the O-DU, in the other direction (or the same, if sent by the O-DU) */
+            flow_state_t *request_state = lookup_flow(pinfo, eAxC, ORAN_C_PLANE, true);
+            if (!request_state || !request_state->ack_nack_requests) {
+                request_state = state;
+            }
+
             /* Show ACKs and NACKs. For both, try to link back to request. */
             for (unsigned int n=1; n <= number_of_acks; n++) {
                 uint32_t ackid;
@@ -6750,8 +6756,11 @@ static int dissect_oran_c(tvbuff_t *tvb, packet_info *pinfo,
                 offset += 2;
 
                 /* Look up request table in state (which really should be set by now, but test anyway). */
-                if (state && state->ack_nack_requests) {
-                    ack_nack_request_t *request = wmem_tree_lookup32(state->ack_nack_requests, ackid);
+                if (request_state && request_state->ack_nack_requests) {
+                    ack_nack_request_t *request = wmem_tree_lookup32(request_state->ack_nack_requests, ackid);
+                    if (!request && state && state->ack_nack_requests) {
+                        request = wmem_tree_lookup32(state->ack_nack_requests, ackid);
+                    }
                     if (request != NULL) {
                         /* On first pass, update with this response */
                         if (!PINFO_FD_VISITED(pinfo)) {
@@ -6780,8 +6789,11 @@ static int dissect_oran_c(tvbuff_t *tvb, packet_info *pinfo,
                                        nackid);
 
                 /* Look up request table in state. */
-                if (state && state->ack_nack_requests) {
-                    ack_nack_request_t *request = wmem_tree_lookup32(state->ack_nack_requests, nackid);
+                if (request_state && request_state->ack_nack_requests) {
+                    ack_nack_request_t *request = wmem_tree_lookup32(request_state->ack_nack_requests, nackid);
+                    if (!request && state && state->ack_nack_requests) {
+                        request = wmem_tree_lookup32(state->ack_nack_requests, nackid);
+                    }
                     if (request) {
                         /* On first pass, update with this response */
                         if (!PINFO_FD_VISITED(pinfo)) {
