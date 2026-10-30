@@ -838,7 +838,7 @@ static const enum_val_t dl_compression_options[] = {
     { "BFP_AND_SELECTIVE_RE",                  "Block Floating Point + selective RE sending",                                BFP_AND_SELECTIVE_RE },
     { "MOD_COMPR_AND_SELECTIVE_RE",            "Modulation Compression + selective RE sending",                              MOD_COMPR_AND_SELECTIVE_RE },
     { "BFP_AND_SELECTIVE_RE_WITH_MASKS",       "Block Floating Point + selective RE sending with masks in section header",   BFP_AND_SELECTIVE_RE_WITH_MASKS },
-    { "MOD_COMPR_AND_SELECTIVE_RE_WITH_MASKS", "Modulation Compression + selective RE sending with masks in section header", MOD_COMPR_AND_SELECTIVE_RE },
+    { "MOD_COMPR_AND_SELECTIVE_RE_WITH_MASKS", "Modulation Compression + selective RE sending with masks in section header", MOD_COMPR_AND_SELECTIVE_RE_WITH_MASKS },
     { NULL, NULL, 0 }
 };
 
