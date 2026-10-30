@@ -1791,8 +1791,8 @@ static void ext11_work_out_bundles(unsigned startPrbc,
             settings->bundles[n].start = startPrbc + n*numBundPrb;
             settings->bundles[n].end =   settings->bundles[n].start + numBundPrb-1;
             /* Does it go beyond the end? */
-            if (settings->bundles[n].end > startPrbc+numPrbc) {
-                settings->bundles[n].end = startPrbc+numPrbc;
+            if (settings->bundles[n].end > startPrbc+numPrbc-1) {
+                settings->bundles[n].end = startPrbc+numPrbc-1;
                 settings->bundles[n].is_orphan = true;
             }
         }
@@ -1813,8 +1813,8 @@ static void ext11_work_out_bundles(unsigned startPrbc,
                 settings->bundles[idx].start = prb_offset + n*numBundPrb;
                 settings->bundles[idx].end =   settings->bundles[idx].start + numBundPrb-1;
                 /* Does it go beyond the end? */
-                if (settings->bundles[idx].end > prb_offset + settings->ext12_pairs[p].num_prb) {
-                    settings->bundles[idx].end = prb_offset + settings->ext12_pairs[p].num_prb;
+                if (settings->bundles[idx].end > prb_offset + settings->ext12_pairs[p].num_prb - 1) {
+                    settings->bundles[idx].end = prb_offset + settings->ext12_pairs[p].num_prb - 1;
                     settings->bundles[idx].is_orphan = true;
                 }
                 /* Range check / return */
@@ -1845,8 +1845,8 @@ static void ext11_work_out_bundles(unsigned startPrbc,
                 }
                 settings->bundles[alloc_start+n].start = settings->ext13_start_prbs[alloc] + startPrbc + n*numBundPrb;
                 settings->bundles[alloc_start+n].end =   settings->bundles[alloc_start+n].start + numBundPrb-1;
-                if (settings->bundles[alloc_start+n].end > settings->ext13_start_prbs[alloc] + numPrbc) {
-                    settings->bundles[alloc_start+n].end = settings->ext13_start_prbs[alloc] + numPrbc;
+                if (settings->bundles[alloc_start+n].end > settings->ext13_start_prbs[alloc] + startPrbc + numPrbc - 1) {
+                    settings->bundles[alloc_start+n].end = settings->ext13_start_prbs[alloc] + startPrbc + numPrbc - 1;
                     settings->bundles[alloc_start+n].is_orphan = true;
                 }
             }
@@ -1866,8 +1866,8 @@ static void ext11_work_out_bundles(unsigned startPrbc,
             settings->bundles[n].start = startPrbc + n*numBundPrb;
             settings->bundles[n].end =   settings->bundles[n].start + numBundPrb - 1;
             /* If would go beyond end of PRBs, limit and identify as orphan */
-            if (settings->bundles[n].end > startPrbc+numPrbc) {
-                settings->bundles[n].end = startPrbc+numPrbc;
+            if (settings->bundles[n].end > startPrbc+numPrbc-1) {
+                settings->bundles[n].end = startPrbc+numPrbc-1;
                 settings->bundles[n].is_orphan = true;
             }
         }
