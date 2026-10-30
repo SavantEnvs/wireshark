@@ -1,0 +1,6 @@
+project: savantenvs/wireshark
+target: fuzzshark_ip_proto-ospf
+cmds:
+  - cmd: /mayhem/fuzzshark_ip_proto-ospf
+    libfuzzer: true
+    timeout: 10
