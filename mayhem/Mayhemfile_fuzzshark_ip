@@ -1,0 +1,6 @@
+project: savantenvs/wireshark
+target: fuzzshark_ip
+cmds:
+  - cmd: /mayhem/fuzzshark_ip
+    libfuzzer: true
+    timeout: 10

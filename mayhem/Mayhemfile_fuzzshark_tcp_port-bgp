@@ -1,0 +1,6 @@
+project: savantenvs/wireshark
+target: fuzzshark_tcp_port-bgp
+cmds:
+  - cmd: /mayhem/fuzzshark_tcp_port-bgp
+    libfuzzer: true
+    timeout: 10

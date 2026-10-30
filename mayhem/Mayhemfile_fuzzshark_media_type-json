@@ -1,0 +1,6 @@
+project: savantenvs/wireshark
+target: fuzzshark_media_type-json
+cmds:
+  - cmd: /mayhem/fuzzshark_media_type-json
+    libfuzzer: true
+    timeout: 10
