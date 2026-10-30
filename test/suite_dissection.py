@@ -27164,3 +27164,266 @@ class TestDissectCmp:
             ','.join(it + str(n) for n in
                      (1, 2, 3, 4, 5, 6, 11, 12, 15, 16, 17, 18, 19, 20, 23, 22)),
         ]
+
+
+class TestDissectOran:
+    def test_oran_protocols(self, cmd_tshark, capture_file, test_env):
+        '''O-RAN FH CUS C-plane and U-plane over eCPRI decode without
+        malformed packets or warnings, in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('oran_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 92
+        assert protocols.count('O-RAN-FH-C') == 65
+        assert protocols.count('O-RAN-FH-U') == 27
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('oran_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_oran_section_types(self, cmd_tshark, capture_file, test_env):
+        '''Every C-plane section type the dissector knows, every ST4
+        command, LAA message type and measurement type, and every section
+        extension the dissector implements (1-34).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('oran_coverage.pcap.gz'),
+                '-Y', 'oran_fh_cus.c-plane',
+                '-Tfields', '-eoran_fh_cus.sectionType', '-eoran_fh_cus.extType',
+                '-eoran_fh_cus.st4CmdType', '-eoran_fh_cus.laaMsgType',
+                '-eoran_fh_cus.measTypeId',
+            ), encoding='utf-8', env=test_env)
+        values = [set() for _ in range(5)]
+        for line in stdout.splitlines():
+            for i, field in enumerate(line.split('\t')):
+                values[i].update(int(v) for v in field.split(',') if v)
+        sts, ses, cmds, laa, meas = values
+        assert sts == {0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+        assert ses == set(range(1, 35))
+        assert cmds == set(range(1, 7))
+        assert laa == set(range(7))
+        assert meas == set(range(1, 14))
+
+    def test_oran_uplane_compression(self, cmd_tshark, capture_file, test_env):
+        '''U-plane udCompHdr methods and widths, udCompLen, and
+        uncompressed samples: the largest positive value is +1 (it was
+        shown as negative for widths below 16), and 1-bit samples are 0 or
+        -1 (they were divided by zero).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('oran_coverage.pcap.gz'),
+                '-Y', 'oran_fh_cus.u-plane && oran_fh_cus.udCompHdrWidth',
+                '-Tfields', '-eframe.number', '-eoran_fh_cus.udCompHdrWidth', '-eoran_fh_cus.udCompLen',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '2\t9,9\t', '3\t9,9\t', '12\t9\t48', '13\t0,0,1,9,14,0\t', '14\t2,3,12\t29,13',
+            '15\t9\t', '16\t1\t', '19\t12,12\t46', '23\t9,8\t', '24\t9\t', '26\t10\t',
+            '28\t2,3,4,4\t24', '32\t9,9\t', '33\t9,9\t', '91\t9,9,4\t41,57,17', '92\t0,2\t',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('oran_coverage.pcap.gz'),
+                '-Y', 'oran_fh_cus.u-plane',
+                '-Tfields', '-eoran_fh_cus.udCompHdrMeth',
+            ), encoding='utf-8', env=test_env)
+        methods = set(int(m) for line in stdout.split() for m in line.split(','))
+        assert methods == {0, 1, 4, 5, 6, 7, 8}
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('oran_coverage.pcap.gz'),
+                '-Y', 'frame.number == 13',
+                '-Tfields', '-eoran_fh_cus.iSample', '-eoran_fh_cus.qSample',
+            ), encoding='utf-8', env=test_env)
+        i_samples, q_samples = (f.split(',') for f in stdout.strip().split('\t'))
+        # sectionId 2: I = 0x7fff, Q = 0x8001 (16 bits) in all 12 REs
+        assert i_samples[:12] == ['1'] * 12
+        assert q_samples[:12] == ['-1'] * 12
+        # sectionId 4: 1-bit samples, I = 1, Q = 0 in the first PRB
+        assert i_samples[24:36] == ['-1'] * 12
+        assert q_samples[24:36] == ['0'] * 12
+        # sectionId 12: 9 bits, I = 0x0ff (largest positive), Q = 0x101
+        assert i_samples[48:60] == ['1'] * 12
+        assert q_samples[48:60] == ['-1'] * 12
+
+    def test_oran_plane_linking(self, cmd_tshark, capture_file, test_env):
+        '''U-plane sections link back to the C-plane section with the same
+        sectionId and timing, C-plane frames list their U-plane frames on
+        the second pass, and UL U-plane takes udCompHdr from UL C-plane.'''
+        stdout = subprocess.check_output((cmd_tshark, '-2',
+                '-r', capture_file('oran_coverage.pcap.gz'),
+                '-Y', 'oran_fh_cus.cplane-frame || oran_fh_cus.uplane-frame',
+                '-Tfields', '-eframe.number', '-eoran_fh_cus.cplane-frame', '-eoran_fh_cus.uplane-frame',
+                '-eoran_fh_cus.u-plane-frames-total', '-eoran_fh_cus.ul-cplane.udCompHdr',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\t\t2,2,3,3\t2\t',
+            '2\t1,1\t\t\t',
+            '3\t1,1\t\t\t',
+            '4\t\t5,6,7\t3\t',
+            '5\t4\t\t\t4',
+            '6\t4\t\t\t4',
+            '7\t4\t\t\t4',
+            '8\t\t9\t1\t',
+            '9\t8\t\t\t8',
+            '10\t\t11\t1\t',
+            '11\t10\t\t\t10',
+            '27\t\t28,28,28,28\t1\t',
+            '28\t27,27,27,27\t\t\t',
+            '30\t\t32,32\t1\t',
+            '31\t\t33,33\t1\t',
+            '32\t30,30\t\t\t',
+            '33\t31,31\t\t\t',
+        ]
+
+    def test_oran_acknack(self, cmd_tshark, capture_file, test_env):
+        '''SE 22 and ST4 ackNackReqIds are answered by ST8 ACKs, linked
+        both ways on the second pass.'''
+        stdout = subprocess.check_output((cmd_tshark, '-2',
+                '-r', capture_file('oran_coverage.pcap.gz'),
+                '-Y', 'oran_fh_cus.ackNackId.response-frame || oran_fh_cus.ackNackId.request-frame',
+                '-Tfields', '-eframe.number', '-eoran_fh_cus.ackNackId.response-frame',
+                '-eoran_fh_cus.ackNackId.request-frame', '-eoran_fh_cus.ackNackId.request-type',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '41\t60\t\t',
+            '44\t60\t\t',
+            '52\t57\t\t',
+            '53\t57,58\t\t',
+            '54\t57,58\t\t',
+            '56\t58\t\t',
+            '57\t\t52,53,54\t1,2,3',
+            '58\t\t56,54,53\t4,5,6',
+            '60\t\t41,44\t0,0',
+            # ST8 sent from the O-RU address finds the SE 22 request
+            '89\t90\t\t',
+            '90\t\t89\t0',
+        ]
+
+    def test_oran_reassembly(self, cmd_tshark, capture_file, test_env):
+        '''U-plane messages split by radio-transport fragmentation are
+        reassembled.'''
+        stdout = subprocess.check_output((cmd_tshark, '-2',
+                '-r', capture_file('oran_coverage.pcap.gz'),
+                '-Y', 'frame.number in {21..26}',
+                '-Tfields', '-eframe.number', '-eoran_fh_cus.reassembled_in',
+                '-eoran_fh_cus.reassembled.length', '-eoran_fh_cus.fragment.count',
+                '-eoran_fh_cus.sectionId',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '21\t23\t\t\t1',
+            '22\t23\t\t\t',
+            '23\t\t148\t3\t1,2',
+            '24\t\t\t\t3',
+            '25\t26\t\t\t1',
+            '26\t\t72\t2\t1',
+        ]
+
+    def test_oran_fixed_values(self, cmd_tshark, capture_file, test_env):
+        '''Values that were dissected wrongly: SE 31 mcsIndex per UE, the
+        ST4 TRX_CONTROL antMask, the measurement report 11 layer count,
+        the SE 6 + SE 11 bundles, the SE 1 beamspace weights, the all-zero
+        weights item, and no previous-frame link without a sequence error.'''
+        def fields(*args, passes=()):
+            return subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('oran_coverage.pcap.gz'),
+                    *args), encoding='utf-8', env=test_env).splitlines()
+        assert fields('-Y', 'oran_fh_cus.mcsIndex',
+                      '-Tfields', '-eframe.number', '-eoran_fh_cus.mcsIndex') == [
+            '40\t5,17,33,9,27', '45\t10,11,12,13']
+        assert fields('-Y', 'oran_fh_cus.trxControl.antMask',
+                      '-Tfields', '-eframe.number', '-eoran_fh_cus.trxControl.antMask') == [
+            '54\ta50f,0102030405060708', '55\t0001']
+        assert fields('-Y', 'oran_fh_cus.ueLayerPreEqSinr',
+                      '-Tfields', '-eframe.number', '-eoran_fh_cus.ueLayerPreEqSinr') == [
+            '74\t0x0101,0x0202,0x0303,0x0404', '75\t0x0505,0x0606']
+        # SE 6 (rbgSize 4, bits 0 and 2) + SE 11 (numBundPrb 2): 4 bundles in
+        # each of the two sections (with and without weights)
+        assert fields('-Y', 'frame.number == 38 && count(oran_fh_cus.bfw.bundle) == 8',
+                      '-Tfields', '-eoran_fh_cus.bfw.bundleId') == ['0,1,2,3']
+        # SE 1: 6 + 4 + 4 + 2 + 2 weights; the beamspace one (sectionId 22) has
+        # 4, from the bits set in activeBeamspaceCoefficientMask
+        assert fields('-Y', 'frame.number == 34 && count(oran_fh_cus.bfwI) == 18', '-Tfields',
+                      '-eoran_fh_cus.activeBeamspaceCoefficientMask.bits-set') == ['4']
+        assert fields('-Y', 'oran_fh_cus.zero-bundle', '-Tfields', '-eframe.number') == ['34', '36']
+        assert fields('-Y', 'oran_fh_cus.previous-frame', '-Tfields', '-eframe.number',
+                      passes=('-2',)) == []
+
+    def test_oran_corrected_dissection(self, cmd_tshark, capture_file, test_env):
+        '''Fields and layouts that were dissected wrongly: ST9
+        numSinrPerPrb in the top 3 bits, beamspace TRX numbering from the
+        top bit, orphan SE 11 bundle ranges (default, SE 12, SE 13), U-plane
+        methods 7 and 8, a smaller last U-plane section, ST4 command 1 with
+        startSymbolId and with bfwCompParam and padding, SE 1 BFP 4-bit
+        weights, beamIdAP and puncReMask widths, uePrefRank and ueZeAoa.'''
+        import re
+        def run(*args):
+            return subprocess.check_output((cmd_tshark,
+                    '-r', capture_file('oran_coverage.pcap.gz'),
+                    *args), encoding='utf-8', env=test_env)
+        def fields(*args):
+            return run(*args).splitlines()
+        # ST9: numSinrPerPrb codes 0-5 with oruControlSinrSlotMaskId 3, and
+        # 1, 2, 3, 4, 6, 12 SINR values for each of the 2 PRBs
+        assert fields('-Y', 'frame.number in {68..73}', '-Tfields', '-eoran_fh_cus.numSinrPerPrb',
+                      '-eoran_fh_cus.oruControlSinrSlotMaskId') == [
+            '%u\t3' % n for n in range(6)]
+        for frame, count in zip(range(68, 74), (2, 4, 6, 8, 12, 24)):
+            assert fields('-Y', 'frame.number == %u && count(oran_fh_cus.sinrValue) == %u' % (frame, count),
+                          '-Tfields', '-eframe.number') == [str(frame)]
+        verbose = run('-Y', 'frame.number in {34, 36, 79, 83, 86, 88}', '-V', '-O', 'oran_fh_cus')
+        # activeBeamspaceCoefficientMask 80 00 01 05: TRX 1, 24, 30, 32
+        beamspace = verbose[verbose.index('[Array elements set: 4]'):]
+        assert re.findall(r'^ {12}TRX +(\d+): ', beamspace, re.M)[:4] == ['1', '24', '30', '32']
+        # Orphan bundles end at the last PRB of the range
+        orphans = re.findall(r'^ {12}(?:Orphaned  : \((PRBs? +[\d -]+)\)|Bundle: \((PRBs +[\d -]+)\).*Orphaned)',
+                             verbose, re.M)
+        assert [a or b for a, b in orphans] == [
+            'PRB        4',            # frame 36: 5 PRBs in bundles of 2
+            'PRB        3',            # frame 79: 4 PRBs in bundles of 3
+            'PRBs   9-  9',            # disableBFWs, 4 PRBs from 6
+            'PRBs   0- 11',            # SE 6, numBundPrb larger than the rbg
+            'PRBs   5-  5',            # SE 12 pair 3-5 in bundles of 2
+            'PRBs   0-  0',            # frame 83: SE 12 range and pair of 1 PRB
+            'PRBs   1-  1',
+            'PRBs  42- 42',            # frame 88: SE 13 hops to 30 and 60 (+10)
+            'PRBs  72- 72',
+        ]
+        # ST4 command 1 TRX numbering from 1 (frame 86 has 32 weights)
+        st4 = run('-Y', 'frame.number == 86', '-V', '-O', 'oran_fh_cus')
+        assert re.findall(r'^ {12}TRX +(\d+): ', st4, re.M) == [str(n) for n in range(1, 33)]
+        # U-plane methods 7 and 8: REs from sReSMask1/2; unscaled BFP values
+        i_samples = fields('-Y', 'frame.number == 91', '-o', 'oran_fh_cus.oran.unscaled_iq:TRUE',
+                           '-Tfields', '-eoran_fh_cus.iSample')[0].split(',')
+        assert i_samples[:30] == ['32', '88', '144', '200', '40', '96', '152', '208', '264', '320', '376',
+                                  '432'] + ['0'] * 18
+        assert fields('-Y', 'frame.number == 91 && count(oran_fh_cus.iSample) == 35', '-Tfields',
+                      '-eoran_fh_cus.sReSMask1', '-eoran_fh_cus.sReSMask2') == ['0x000f,0x03f0,0x0801\t0x0ff0,0x0000,0x0700']
+        # The last section of frame 92 has smaller PRBs than the first
+        assert fields('-Y', 'frame.number == 92', '-Tfields', '-eoran_fh_cus.sectionId',
+                      '-eoran_fh_cus.numPrbu') == ['4,5\t2,1']
+        # ST4 command 1 with startSymbolId 2, and with BFP weights and padding
+        assert fields('-Y', 'frame.number == 86', '-Tfields', '-eoran_fh_cus.tdBeamNum') == [
+            '0x0041,0x0031,0x0033,0x0032']
+        # SE 1 with 4-bit BFP weights: 4 weights after bfwCompParam
+        assert fields('-Y', 'frame.number == 87 && count(oran_fh_cus.bfwI) == 4 && !_ws.malformed',
+                      '-Tfields', '-eframe.number') == ['87']
+        assert fields('-Y', 'frame.number == 35', '-Tfields', '-eoran_fh_cus.beamIdAP1',
+                      '-eoran_fh_cus.beamIdAP2', '-eoran_fh_cus.beamIdAP3') == ['4660\t66\t32767']
+        assert fields('-Y', 'frame.number == 41', '-Tfields', '-eoran_fh_cus.puncReMask') == ['4095,240']
+        assert fields('-Y', 'frame.number == 74', '-Tfields', '-eoran_fh_cus.uePrefRank',
+                      '-eoran_fh_cus.ueZeAoa') == ['1,3,2\t256,2048,512,2048']
+        assert fields('-Y', 'frame.number == 74 && _ws.expert', '-Tfields', '-eframe.number') == []
+        assert len(re.findall(r'ueZeAoa: 2048 \(reserved\)', run('-Y', 'frame.number == 74', '-V'))) == 2
+
+    def test_oran_stat_tap(self, cmd_tshark, capture_file, test_env):
+        '''The oran-fh-cus,stat tap lists the flows.'''
+        stdout = subprocess.check_output((cmd_tshark, '-q',
+                '-r', capture_file('oran_coverage.pcap.gz'),
+                '-z', 'oran-fh-cus,stat',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        flows = [l.split() for l in lines if l.startswith('     C\t') or l.startswith('     U\t')]
+        assert len(flows) == 35
+        assert ['C', '0:1:0:0', 'DL', '1', '46', '1', '1', '2', '10', '11', '1', '0'] in flows
+        assert ' Unique DL beams      Unique UL beams' in lines
