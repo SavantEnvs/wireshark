@@ -6129,13 +6129,17 @@ static int dissect_udcomphdr(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree
         /* udIqWidth */
 
         proto_item *iq_width_item = proto_tree_add_item_ret_uint(udcomphdr_tree, hf_oran_udCompHdrIqWidth , tvb, offset, 1, ENC_NA, &hdr_iq_width);
-        *bit_width = (hdr_iq_width) ? hdr_iq_width : 16;
-        proto_item_append_text(iq_width_item, " (%u bits)", *bit_width);
+        proto_item_append_text(iq_width_item, " (%u bits)", (hdr_iq_width) ? hdr_iq_width : 16);
 
         /* udCompMeth */
         *comp_meth_ti = proto_tree_add_item_ret_uint(udcomphdr_tree, hf_oran_udCompHdrMeth, tvb, offset, 1, ENC_NA, &ud_comp_meth);
-        if (comp_meth) {
-            *comp_meth = ud_comp_meth;
+
+        /* An ignored header does not change the settings */
+        if (!ignore) {
+            *bit_width = (hdr_iq_width) ? hdr_iq_width : 16;
+            if (comp_meth) {
+                *comp_meth = ud_comp_meth;
+            }
         }
     }
 
