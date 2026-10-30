@@ -8391,7 +8391,7 @@ dissect_oran_u(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                         uint32_t sectionId, rb, startPrbu, numPrbu;
                         section_details_t *section_details = NULL;
                         proto_item *sectionHeading = proto_tree_add_string_format(oran_tree, hf_oran_u_section,
-                                                                                  tvb, offset, 0, "", "Section");
+                                                                                  original_tvb, offset, 0, "", "Section");
                         proto_tree *section_tree = proto_item_add_subtree(sectionHeading, ett_oran_u_section);
 
                         /* No C-plane linking for a partial decode */
