@@ -2044,10 +2044,36 @@ static wmem_tree_t *flow_states_table;
 
 
 /* Includes transport details (eth addresses + vlan) */
+/* First and last bytes of the Ethernet source and destination, in the order of the flow */
+static uint32_t flow_key_addresses(packet_info *pinfo, bool opposite_dir)
+{
+    uint32_t word = 0;
+    const uint8_t *src_eth = (pinfo->dl_src.type == AT_ETHER) ? (const uint8_t*)pinfo->dl_src.data : NULL;
+    const uint8_t *dst_eth = (pinfo->dl_dst.type == AT_ETHER) ? (const uint8_t*)pinfo->dl_dst.data : NULL;
+
+    if (!opposite_dir) {
+        if (src_eth) {
+            word |= src_eth[5] | (src_eth[0] << 8);
+        }
+        if (dst_eth) {
+            word |= (dst_eth[5] << 16) | (dst_eth[0] << 24);
+        }
+    }
+    else {
+        if (src_eth) {
+            word |= (src_eth[5] << 16) | (src_eth[0] << 24);
+        }
+        if (dst_eth) {
+            word |= dst_eth[5] | (dst_eth[0] << 8);
+        }
+    }
+    return word;
+}
+
 static flow_state_t* lookup_flow(packet_info *pinfo, uint16_t eaxc_id, uint8_t plane, bool opposite_dir)
 {
     wmem_tree_key_t key[3];
-    uint32_t word1, word2 = 0;
+    uint32_t word1, word2;
 
     /* 1st value is vlan_id(15) | plane(1) | eaxc_id(16) */
     word1 = eaxc_id | (plane << 16) | (pinfo->vlan_id << 17);
@@ -2055,25 +2081,7 @@ static flow_state_t* lookup_flow(packet_info *pinfo, uint16_t eaxc_id, uint8_t p
     key[0].key = &word1;
 
     /* 2nd word is first/last bytes of eth src/dst */
-    const uint8_t *src_eth = (uint8_t*)pinfo->dl_src.data;
-    const uint8_t *dst_eth = (uint8_t*)pinfo->dl_dst.data;
-
-    if (!opposite_dir) {
-        if (src_eth) {
-            word2 |= src_eth[5] | (src_eth[0] << 8);
-        }
-        if (dst_eth) {
-            word2 |= (dst_eth[5] << 16) | (dst_eth[0] << 24);
-        }
-    }
-    else {
-        if (src_eth) {
-            word2 |= (src_eth[5] << 16) | (src_eth[0] << 24);
-        }
-        if (dst_eth) {
-            word2 |= dst_eth[5] | (dst_eth[0] << 8);
-        }
-    }
+    word2 = flow_key_addresses(pinfo, opposite_dir);
     key[1].length = 1;
     key[1].key = &word2;
     key[2].length = 0;
@@ -2085,7 +2093,7 @@ static flow_state_t* lookup_flow(packet_info *pinfo, uint16_t eaxc_id, uint8_t p
 static void store_flow(packet_info *pinfo, uint16_t eaxc_id, uint8_t plane, bool opposite_dir, flow_state_t *state)
 {
     wmem_tree_key_t key[3];
-    uint32_t word1, word2 = 0;
+    uint32_t word1, word2;
 
     /* 1st value is vlan_id(15) | plane(1) | eaxc_id(16) */
     word1 = eaxc_id | (plane << 16) | (pinfo->vlan_id << 17);
@@ -2093,25 +2101,7 @@ static void store_flow(packet_info *pinfo, uint16_t eaxc_id, uint8_t plane, bool
     key[0].key = &word1;
 
     /* 2nd word is first/last bytes of eth src/dst */
-    const uint8_t *src_eth = (uint8_t*)pinfo->dl_src.data;
-    const uint8_t *dst_eth = (uint8_t*)pinfo->dl_dst.data;
-
-    if (!opposite_dir) {
-        if (src_eth) {
-            word2 |= src_eth[5] | (src_eth[0] << 8);
-        }
-        if (dst_eth) {
-            word2 |= (dst_eth[5] << 16) | (dst_eth[0] << 24);
-        }
-    }
-    else {
-        if (src_eth) {
-            word2 |= (src_eth[5] << 16) | (src_eth[0] << 24);
-        }
-        if (dst_eth) {
-            word2 |= dst_eth[5] | (dst_eth[0] << 8);
-        }
-    }
+    word2 = flow_key_addresses(pinfo, opposite_dir);
     key[1].length = 1;
     key[1].key = &word2;
     key[2].length = 0;
