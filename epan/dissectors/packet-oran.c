@@ -8567,18 +8567,11 @@ dissect_oran_u(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                                         &sample_bit_width, compression, ud_cmp_hdr_cplane, &nBytesPerPrb);
         bytesLeft = tvb_captured_length(tvb) - offset;
         number_of_sections++;
-    } while (bytesLeft >= (4 + nBytesPerPrb));     /* FIXME: bad heuristic */
+    } while (bytesLeft >= 4);     /* eCPRI payload ends after the sections and 0-3 bytes of padding */
 
     /* Show number of sections found */
     proto_item *ti = proto_tree_add_uint(oran_tree, hf_oran_numberOfSections, tvb, 0, 0, number_of_sections);
     proto_item_set_generated(ti);
-
-    /* Expert error if we are short of tvb by > 3 bytes */
-    if (tvb_reported_length_remaining(tvb, offset) > 3) {
-        expert_add_info_format(pinfo, protocol_item, &ei_oran_frame_length,
-                               "%u bytes remain at end of frame - should be 0-3",
-                               tvb_reported_length_remaining(tvb, offset));
-    }
 
     return tvb_captured_length(tvb);
 }
