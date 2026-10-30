@@ -1961,10 +1961,11 @@ typedef struct {
     mod_compr_params_t mod_comp_params;
 } flow_state_t;
 
-static section_mod_compr_config_t* get_mod_compr_section_to_write(flow_state_t *flow,
+static section_mod_compr_config_t* get_mod_compr_section_to_write(packet_info *pinfo, flow_state_t *flow,
                                                            unsigned sectionId)
 {
-    if (flow == NULL) {
+    /* Only record configs on the first pass */
+    if (flow == NULL || PINFO_FD_VISITED(pinfo)) {
         return NULL;
     }
 
@@ -3805,7 +3806,7 @@ static int dissect_oran_c_section(tvbuff_t *tvb, proto_tree *tree, packet_info *
                 float value = ((float)mantissa/(1<<11)) * ((float)1.0 / (1 << exponent));
                 proto_item_append_text(ti, " (%f)", value);
 
-                section_mod_compr_config_t* sect_config = get_mod_compr_section_to_write(state, sectionId);
+                section_mod_compr_config_t* sect_config = get_mod_compr_section_to_write(pinfo, state, sectionId);
 
                 /* Store these params in this flow's state */
                 if (sect_config && sect_config->num_configs < MAX_MOD_COMPR_CONFIGS) {
@@ -3917,7 +3918,7 @@ static int dissect_oran_c_section(tvbuff_t *tvb, proto_tree *tree, packet_info *
                     proto_item_append_text(ti, " (%f)", mcScaleOffset_value);
                     bit_offset += 15;
 
-                    section_mod_compr_config_t* sect_config = get_mod_compr_section_to_write(state, sectionId);
+                    section_mod_compr_config_t* sect_config = get_mod_compr_section_to_write(pinfo, state, sectionId);
 
                     /* Record this config */
                     if (sect_config && sect_config->num_configs < MAX_MOD_COMPR_CONFIGS) {
@@ -5044,7 +5045,7 @@ static int dissect_oran_c_section(tvbuff_t *tvb, proto_tree *tree, packet_info *
 
                         /* Record this config.  */
                         /* TODO: at some point, will also want to store/use PRB + symbol filters */
-                        section_mod_compr_config_t* sect_config = get_mod_compr_section_to_write(state, sectionId);
+                        section_mod_compr_config_t* sect_config = get_mod_compr_section_to_write(pinfo, state, sectionId);
 
                         if (sect_config && sect_config->num_configs < MAX_MOD_COMPR_CONFIGS) {
                             unsigned i = sect_config->num_configs;
