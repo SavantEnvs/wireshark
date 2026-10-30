@@ -499,6 +499,7 @@ static int hf_oran_freq_offset_fb;
 static int hf_oran_num_ue_sinr_rpt;
 static int hf_oran_num_sinr_per_prb;
 static int hf_oran_num_sinr_per_prb_right;
+static int hf_oran_num_sinr_per_prb_st9;
 
 static int hf_oran_sinr_value;
 
@@ -6803,7 +6804,7 @@ static int dissect_oran_c(tvbuff_t *tvb, packet_info *pinfo,
         {
             /* numSinrPerPrb (3 bits) */
             proto_item *nspp_ti;
-            nspp_ti = proto_tree_add_item_ret_uint(section_tree, hf_oran_num_sinr_per_prb, tvb, offset, 1, ENC_BIG_ENDIAN, &num_sinr_per_prb);
+            nspp_ti = proto_tree_add_item_ret_uint(section_tree, hf_oran_num_sinr_per_prb_st9, tvb, offset, 1, ENC_BIG_ENDIAN, &num_sinr_per_prb);
             switch (num_sinr_per_prb) {
                 case 0:
                     num_sinr_per_prb = 1; break;
@@ -6820,10 +6821,10 @@ static int dissect_oran_c(tvbuff_t *tvb, packet_info *pinfo,
 
                 default:
                     proto_item_append_text(nspp_ti, " (invalid)");
-                    num_sinr_per_prb = 1;
                     expert_add_info_format(pinfo, nspp_ti, &ei_oran_num_sinr_per_prb_unknown,
                                            "Invalid numSinrPerPrb value (%u)",
                                            num_sinr_per_prb);
+                    num_sinr_per_prb = 1;
             }
 
             /* oruControlSinrSlotMaskId (5 bits) */
@@ -11300,6 +11301,12 @@ proto_register_oran(void)
           { "numSinrPerPrb", "oran_fh_cus.numSinrPerPrb",
             FT_UINT8, BASE_DEC,
             VALS(num_sinr_per_prb_vals), 0x07,
+            "number of SINR values per PRB", HFILL}
+        },
+        { &hf_oran_num_sinr_per_prb_st9,
+          { "numSinrPerPrb", "oran_fh_cus.numSinrPerPrb",
+            FT_UINT8, BASE_DEC,
+            VALS(num_sinr_per_prb_vals), 0xe0,
             "number of SINR values per PRB", HFILL}
         },
 
