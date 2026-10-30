@@ -5864,7 +5864,7 @@ static int dissect_oran_c_section(tvbuff_t *tvb, proto_tree *tree, packet_info *
                         start_value = ue_ze_aoa * (float)0.1;
                         proto_item_append_text(ue_ze_aoa_ti, " (%.1f <= val < %.1f degrees)", start_value, start_value + (float)0.1);
                     }
-                    else if (ue_az_aoa == 0xffff) {
+                    else if (ue_ze_aoa == 0xffff) {
                         proto_item_append_text(ue_ze_aoa_ti, " (invalid measurement result)");
                     }
                     else {
@@ -5947,7 +5947,7 @@ static int dissect_oran_c_section(tvbuff_t *tvb, proto_tree *tree, packet_info *
                     }
 
                     /* uePrefRank (4 bits) */
-                    add_reserved_field(mr_tree, hf_oran_ue_pref_rank, tvb, offset, 1);
+                    proto_tree_add_item(mr_tree, hf_oran_ue_pref_rank, tvb, offset, 1, ENC_BIG_ENDIAN);
                     offset += 1;
 
                     for (uint8_t cand_rank=1; cand_rank <= num_cand_ranks; cand_rank++) {
@@ -6994,7 +6994,7 @@ static int dissect_oran_c(tvbuff_t *tvb, packet_info *pinfo,
                     /* Symbol bits before 'startSymbolId' in Section Type 4 common header should be set to 0 by O-DU and shall be ignored by O-RU */
                     /* lsb is symbol 0 */
                     for (unsigned s=0; s < 14; s++) {
-                        if ((startSymbolId & (1 << s)) && (startSymbolId > s)) {
+                        if ((symbol_mask & (1 << s)) && (startSymbolId > s)) {
                             proto_item_append_text(symbol_mask_ti, " (startSymbolId is %u, so some lower symbol bits ignored!)", startSymbolId);
                             expert_add_info(pinfo, symbol_mask_ti, &ei_oran_start_symbol_id_bits_ignored);
                             break;
@@ -10428,7 +10428,7 @@ proto_register_oran(void)
         { &hf_oran_puncReMask,
           { "puncReMask", "oran_fh_cus.puncReMask",
             FT_UINT16, BASE_DEC,
-            NULL, 0xffc0,
+            NULL, 0xfff0,
             "puncturing pattern RE mask", HFILL}
         },
         /* 7.7.20.12 multiSDScope */
@@ -11022,21 +11022,21 @@ proto_register_oran(void)
         { &hf_oran_beamid_ap1,
           { "beamIdAP1", "oran_fh_cus.beamIdAP1",
             FT_UINT16, BASE_DEC,
-            NULL, 0x7f,
+            NULL, 0x7fff,
             "beam id to be used for antenna port 1", HFILL}
         },
         /* 7.7.3.10 */
         { &hf_oran_beamid_ap2,
           { "beamIdAP2", "oran_fh_cus.beamIdAP2",
             FT_UINT16, BASE_DEC,
-            NULL, 0x7f,
+            NULL, 0x7fff,
             "beam id to be used for antenna port 2", HFILL}
         },
         /* 7.7.3.11 */
         { &hf_oran_beamid_ap3,
           { "beamIdAP3", "oran_fh_cus.beamIdAP3",
             FT_UINT16, BASE_DEC,
-            NULL, 0x7f,
+            NULL, 0x7fff,
             "beam id to be used for antenna port 3", HFILL}
         },
 
