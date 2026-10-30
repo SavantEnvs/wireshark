@@ -3031,6 +3031,9 @@ static int dissect_oran_c_section(tvbuff_t *tvb, proto_tree *tree, packet_info *
 
     bool extension_flag = false;
 
+    /* All remaining symbols for section types without numSymbol */
+    uint32_t numSymbol = 14;
+
     /* These sections (ST0, ST1, ST2, ST3, ST5, ST9, ST10, ST11) are similar, so handle as common with per-type differences */
     if (((sectionType <= SEC_C_UE_SCHED) || (sectionType >= SEC_C_SINR_REPORTING)) &&
          (sectionType != SEC_C_SLOT_CONTROL)) {
@@ -3125,7 +3128,6 @@ static int dissect_oran_c_section(tvbuff_t *tvb, proto_tree *tree, packet_info *
                                               hf_oran_reMask, ett_oran_remask, remask_flags, ENC_BIG_ENDIAN, &remask);
             offset++;
             /* numSymbol */
-            uint32_t numSymbol;
             numsymbol_ti = proto_tree_add_item_ret_uint(c_section_tree, hf_oran_numSymbol, tvb, offset, 1, ENC_NA, &numSymbol);
             if (((sectionType == SEC_C_RRM_MEAS_REPORTS) || (sectionType == SEC_C_RRM_MEAS_REPORTS_NON_TIMING)) && (numSymbol != 14)) {     /* Section type 10/13 must have 14 symbols */
                 proto_item_append_text(numsymbol_ti, " (for ST10, should be 14!)");
@@ -3465,6 +3467,7 @@ static int dissect_oran_c_section(tvbuff_t *tvb, proto_tree *tree, packet_info *
             details->subframe = subframeId;
             details->slot = slotId;
             details->startSymbol = startSymbolId;
+            details->numSymbols = numSymbol;
 
             details->frame_number = pinfo->num;
             details->frame_time = pinfo->abs_ts;
@@ -7771,7 +7774,7 @@ static int dissect_oran_u_section_header(tvbuff_t *tvb, packet_info *pinfo, unsi
                     section_data->details[0].slot == slotId &&
                     /* Check that symbolId is in range */
                     section_data->details[0].startSymbol <= symbolId &&
-                    (unsigned)(section_data->details[0].startSymbol + section_data->details[0].numSymbols) <= (unsigned)symbolId) {
+                    (unsigned)symbolId < (unsigned)(section_data->details[0].startSymbol + section_data->details[0].numSymbols)) {
 
                     index_to_use = 0;
                 }
@@ -7781,7 +7784,7 @@ static int dissect_oran_u_section_header(tvbuff_t *tvb, packet_info *pinfo, unsi
                          section_data->details[1].slot == slotId &&
                          /* Check that symbolId is in range */
                          section_data->details[1].startSymbol <= symbolId &&
-                         (unsigned)(section_data->details[1].startSymbol + section_data->details[1].numSymbols) <= (unsigned)symbolId) {
+                         (unsigned)symbolId < (unsigned)(section_data->details[1].startSymbol + section_data->details[1].numSymbols)) {
 
                     index_to_use = 1;
                 }
