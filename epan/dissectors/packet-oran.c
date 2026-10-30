@@ -2601,6 +2601,7 @@ static float decompress_value(uint32_t bits, uint32_t comp_method, uint8_t iq_wi
 
         case COMP_BLOCK_FP:         /* block floating point */
         case BFP_AND_SELECTIVE_RE:
+        case BFP_AND_SELECTIVE_RE_WITH_MASKS:
         {
             /* A.1.3 Block Floating Point Decompression Algorithm */
             int32_t cPRB = bits;
@@ -2631,6 +2632,7 @@ static float decompress_value(uint32_t bits, uint32_t comp_method, uint8_t iq_wi
 
         case COMP_MODULATION:
         case MOD_COMPR_AND_SELECTIVE_RE:
+        case MOD_COMPR_AND_SELECTIVE_RE_WITH_MASKS:
         {
             /* Described in A.5 (with pseudo code) */
             /* N.B., Applies to downlink data only - is not used for BFW */
@@ -7883,6 +7885,7 @@ static float unscaled_power_correction(int sample_bit_width, unsigned compressio
     switch(compression) {
     case COMP_BLOCK_FP:
     case BFP_AND_SELECTIVE_RE:
+    case BFP_AND_SELECTIVE_RE_WITH_MASKS:
         correction = 20.0f*((float)(M_LOG10E/M_LOG2E))*((sample_bit_width-1) + 15);
         break;
     case COMP_NONE:
@@ -7979,6 +7982,8 @@ static int dissect_oran_u_section(tvbuff_t *tvb, packet_info *pinfo, unsigned of
     case BFP_AND_SELECTIVE_RE:
     case COMP_MODULATION:
     case MOD_COMPR_AND_SELECTIVE_RE:
+    case BFP_AND_SELECTIVE_RE_WITH_MASKS:
+    case MOD_COMPR_AND_SELECTIVE_RE_WITH_MASKS:
         break;
     default:
         expert_add_info_format(pinfo, ud_comp_meth_item, &ei_oran_unsupported_compression_method,
