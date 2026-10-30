@@ -7090,7 +7090,7 @@ static int dissect_oran_c(tvbuff_t *tvb, packet_info *pinfo,
                                 /* Create antenna subtree */
                                 int bfw_offset = bit_offset / 8;
                                 proto_item *bfw_ti = proto_tree_add_string_format(command_tree, hf_oran_bfw,
-                                                                                  tvb, bfw_offset, 0, "", "TRX %3u: (", trx);
+                                                                                  tvb, bfw_offset, 0, "", "TRX %3u: (", trx+1);
                                 proto_tree *bfw_tree = proto_item_add_subtree(bfw_ti, ett_oran_bfw);
 
                                 /* I value */
