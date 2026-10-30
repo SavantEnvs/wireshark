@@ -3592,7 +3592,8 @@ static int dissect_oran_c_section(tvbuff_t *tvb, proto_tree *tree, packet_info *
                    May know how many entries from activeBeamspaceCoefficientMask. */
                 if (num_trx == 0) {
                     /* Don't know how many there will be, so just fill available bytes... */
-                    unsigned weights_bytes = (extlen*4)-3;
+                    unsigned extension_end_offset = extension_start_offset + (extlen*4);
+                    unsigned weights_bytes = (offset < extension_end_offset) ? extension_end_offset - offset : 0;
                     unsigned num_weights_pairs = (weights_bytes*8) / (bfwcomphdr_iq_width*2);
                     num_trx = num_weights_pairs;
                 }
