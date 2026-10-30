@@ -7995,7 +7995,7 @@ static int dissect_oran_u_section(tvbuff_t *tvb, packet_info *pinfo, unsigned of
     /* udCompLen (when supported, methods 5,6,7,8) */
     if (compression >= BFP_AND_SELECTIVE_RE) {
         bool supported = (pref_support_udcompLen==1) || /* supported */
-            (pref_support_udcompLen==2 && udcomplen_appears_present(includeUdCompHeader, tvb, offset));
+            (pref_support_udcompLen==2 && udcomplen_appears_present(included, tvb, offset));
 
         if (supported) {
             ud_comp_len_ti = proto_tree_add_item_ret_uint(section_tree, hf_oran_udCompLen, tvb, offset, 2, ENC_BIG_ENDIAN, &ud_comp_len);
