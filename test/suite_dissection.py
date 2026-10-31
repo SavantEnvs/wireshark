@@ -29456,3 +29456,110 @@ class TestDissectCosine:
         assert lengths['15'] == ['40', '16']
         assert lengths['16'] == ['4', '4']
         assert lengths['17'] == ['0', '0']
+
+
+class TestDissectCosnaming:
+    def test_cosnaming_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Every frame is GIOP; all but the replies GIOP decodes itself or
+        does not hand on are CosNaming. None is malformed or has an expert
+        info, in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosnaming_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 68
+        assert protocols.count('COSNAMING') == 63
+        assert protocols.count('GIOP') == 5
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cosnaming_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cosnaming_coverage.pcap.gz'),
+                    '-Y', 'giop-cosnaming',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 63
+
+    def test_cosnaming_operations(self, cmd_tshark, capture_file, test_env):
+        '''Every NamingContext and BindingIterator operation is decoded.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosnaming_coverage.pcap.gz'),
+                '-Y', 'giop.type == 0',
+                '-Tfields', '-egiop-cosnaming.Request_Operation',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.split() == [
+            'resolve', 'resolve', 'bind', 'rebind', 'bind_context',
+            'rebind_context', 'unbind', 'new_context', 'bind_new_context',
+            'list', 'list', 'next_one', 'next_n', 'next_n', 'destroy',
+            'destroy', 'list', 'bind', 'next_one', 'destroy', 'next_n',
+            'unbind', 'bind_context', 'rebind', 'bind', 'bind', 'unbind',
+            'list', 'bind_new_context', 'unbind', 'list', 'bind', 'resolve',
+            'destroy',
+        ]
+
+    def test_cosnaming_bindings(self, cmd_tshark, capture_file, test_env):
+        '''Binding lists in list and next_n replies, big and little
+        endian, including an empty name.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosnaming_coverage.pcap.gz'),
+                '-Y', 'giop-cosnaming.Binding.binding_type',
+                '-Tfields', '-eframe.number',
+                '-egiop-cosnaming.NameComponent.id',
+                '-egiop-cosnaming.NameComponent.kind',
+                '-egiop-cosnaming.Binding.binding_type',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '20\tPrinter,Sales\tdevice,\t0,1',
+            '24\tPrinter\tdevice\t0',
+            '26\tA,B,C\ta,,c\t0,1,0',
+            '34\tQ\tr\t1',
+            '38\t\t\t0',
+            '56\tEleven\tv1.1\t0',
+            '62\tle,le,x\t1,2,\t1,0',
+        ]
+
+    def test_cosnaming_exceptions(self, cmd_tshark, capture_file, test_env):
+        '''NotFound with each reason and CannotProceed are decoded;
+        AlreadyBound (not in the dissector) and an empty exception ID are
+        left to GIOP.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosnaming_coverage.pcap.gz'),
+                '-Y', 'giop.replystatus == 1',
+                '-Tfields', '-eframe.number', '-e_ws.col.protocol',
+                '-egiop.exceptionid',
+                '-egiop-cosnaming.NamingContext.NotFound_why',
+                '-egiop-cosnaming.NameComponent.id',
+            ), encoding='utf-8', env=test_env)
+        nf = 'IDL:omg.org/CosNaming/NamingContext/NotFound:1.0'
+        assert stdout.splitlines() == [
+            '44\tCOSNAMING\t%s\t0\tMissing' % nf,
+            '46\tCOSNAMING\t%s\t1\tx' % nf,
+            '48\tCOSNAMING\t%s\t2\t' % nf,
+            '50\tCOSNAMING\tIDL:omg.org/CosNaming/NamingContext/CannotProceed:1.0\t\tAway',
+            '52\tGIOP\tIDL:omg.org/CosNaming/NamingContext/AlreadyBound:1.0\t\t',
+            '54\tGIOP\t\t\t',
+            '64\tCOSNAMING\t%s\t0\tDoc' % nf,
+        ]
+
+    def test_cosnaming_explicit_dispatch(self, cmd_tshark, capture_file, test_env):
+        '''The object keys learnt from the IORs in the resolve replies
+        (frames 2 and 4) make GIOP call CosNaming explicitly for later
+        requests and their replies, in one and two passes. The explicit
+        call adds the operation to the Info column of a reply once (the
+        heuristic dry run adds it once more).'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cosnaming_coverage.pcap.gz'),
+                    '-Y', 'frame.number in {34, 38, 68}',
+                    '-Tfields', '-e_ws.col.info',
+                ), encoding='utf-8', env=test_env)
+            infos = stdout.splitlines()
+            assert len(infos) == 3
+            for info, op in zip(infos, ('list', 'next_one', 'destroy')):
+                assert info.endswith('No Exception op = %s' % op)
+                assert info.count(' op = ') == 1
