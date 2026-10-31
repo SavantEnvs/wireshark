@@ -29225,3 +29225,133 @@ class TestDissectCosem:
             'Long Unsigned: 513',
             '[2] Structure',
         ]
+
+
+class TestDissectCoseventcomm:
+    def test_coseventcomm_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Every frame is GIOP; the resolve requests are CosNaming, and
+        the CosEventComm operations not passed to (or not taken by) a
+        sub-dissector stay GIOP. None is malformed or has an expert info,
+        in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coseventcomm_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 73
+        assert protocols.count('COSEVENTCOMM') == 50
+        assert protocols.count('COSNAMING') == 4
+        assert protocols.count('GIOP') == 19
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('coseventcomm_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_coseventcomm_operations(self, cmd_tshark, capture_file, test_env):
+        '''Every operation of the four interfaces, requests and replies,
+        dispatched heuristically and explicitly on the object keys learnt
+        from the IORs in the resolve replies, in one and two passes.'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('coseventcomm_coverage.pcap.gz'),
+                    '-Y', 'giop-coseventcomm',
+                    '-Tfields', '-eframe.number', '-egiop.type',
+                    '-egiop-coseventcomm.Request_Operation',
+                    '-egiop-coseventcomm.PullSupplier.try_pull.has_event',
+                ), encoding='utf-8', env=test_env)
+            lines = stdout.splitlines()
+            assert len(lines) == 50
+            assert lines[0:16] == [
+                '9\t0\tpull\t',
+                '10\t1\tpull\t',
+                '11\t0\ttry_pull\t',
+                '12\t1\ttry_pull\tTrue',
+                '13\t0\ttry_pull\t',
+                '14\t1\ttry_pull\tFalse',
+                '15\t0\tpush\t',
+                '16\t1\tpush\t',
+                '17\t0\tdisconnect_pull_consumer\t',
+                '18\t1\tdisconnect_pull_consumer\t',
+                '19\t0\tdisconnect_pull_supplier\t',
+                '20\t1\tdisconnect_pull_supplier\t',
+                '21\t0\tdisconnect_push_supplier\t',
+                '22\t1\tdisconnect_push_supplier\t',
+                '23\t0\tdisconnect_push_consumer\t',
+                '24\t1\tdisconnect_push_consumer\t',
+            ]
+            # explicit dispatch on the learnt keys
+            assert lines[21:35] == [
+                '30\t0\ttry_pull\t',
+                '31\t1\ttry_pull\tTrue',
+                '32\t0\tdisconnect_pull_supplier\t',
+                '33\t1\tdisconnect_pull_supplier\t',
+                '34\t0\tdisconnect_pull_consumer\t',
+                '35\t1\tdisconnect_pull_consumer\t',
+                '36\t0\tpush\t',
+                '37\t1\tpush\t',
+                '38\t0\tdisconnect_push_consumer\t',
+                '39\t1\tdisconnect_push_consumer\t',
+                '40\t0\tdisconnect_push_supplier\t',
+                '41\t1\tdisconnect_push_supplier\t',
+                '42\t0\tpull\t',
+                '43\t1\tpull\t',
+            ]
+
+    def test_coseventcomm_explicit_mismatch(self, cmd_tshark, capture_file, test_env):
+        '''An operation of another interface on a learnt key is not taken
+        by the explicit dispatch; the padded ones are not taken by the
+        heuristic dispatch either and stay GIOP.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coseventcomm_coverage.pcap.gz'),
+                '-Y', 'frame.number >= 46 && frame.number <= 61',
+                '-Tfields', '-eframe.number', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        assert [l.split('\t')[1] for l in stdout.splitlines()] == [
+            'COSEVENTCOMM', 'COSEVENTCOMM',     # pull on a PushConsumer
+            'GIOP', 'GIOP', 'GIOP', 'GIOP',
+            'GIOP', 'COSEVENTCOMM',             # try_pull on a PushConsumer
+            'GIOP', 'GIOP', 'GIOP', 'GIOP',
+            'COSEVENTCOMM', 'GIOP',             # push on a PullSupplier
+            'GIOP', 'GIOP',                     # obtain_push_supplier
+        ]
+
+    def test_coseventcomm_any_enum(self, cmd_tshark, capture_file, test_env):
+        '''An enum in an any shows the member for its value, and a value
+        equal to the member count is outside the enum (before "GIOP: Show
+        the right member of an enum in an any" value 0 printed the member
+        count as a string, 1 showed AAA and 2 showed BBB).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coseventcomm_coverage.pcap.gz'),
+                '-Y', 'giop.tcenumdata',
+                '-V',
+            ), encoding='utf-8', env=test_env)
+        values = [l.strip() for l in stdout.splitlines()
+                  if l.startswith('    E:') or l.strip().startswith('Level:')]
+        assert values == [
+            'Level: HIGH (2)',
+            'E: BBB (1)',
+            'Level: HIGH (2)',
+            'E: AAA (0)',
+            'E: BBB (1)',
+            'E:  ERROR value outside of enum!!! (2)',
+        ]
+
+    def test_coseventcomm_any(self, cmd_tshark, capture_file, test_env):
+        '''The any in pull, try_pull and push carries the value of its
+        type code.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coseventcomm_coverage.pcap.gz'),
+                '-Y', 'giop-coseventcomm && giop.TCKind',
+                '-Tfields', '-eframe.number', '-egiop.TCKind',
+            ), encoding='utf-8', env=test_env)
+        kinds = dict(l.split('\t') for l in stdout.splitlines())
+        assert kinds['10'] == '3'     # tk_long
+        assert kinds['12'] == '18'    # tk_string
+        assert kinds['14'] == '0'     # tk_null
+        assert kinds['15'].split(',')[0] == '15'  # tk_struct
+        assert kinds['26'] == '7'     # tk_double
+        assert kinds['27'] == '8'     # tk_boolean
+        assert kinds['43'] == '17'    # tk_enum, little endian
