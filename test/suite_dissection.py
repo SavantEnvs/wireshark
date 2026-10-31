@@ -30401,3 +30401,97 @@ class TestDissectCrmf:
         assert stdout.splitlines() == [
             '16\t0,0,0,0\t0,1,1\tcrmf-client key 1\tclient@crmf.example',
         ]
+
+
+class TestDissectCsmEncaps:
+    def test_csm_encaps_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Every frame is CSM_ENCAPS and none is malformed or has an
+        expert info, in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csm_encaps_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 13
+        assert protocols.count('CSM_ENCAPS') == 13
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('csm_encaps_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_csm_encaps_control_in_tree(self, cmd_tshark, capture_file, test_env):
+        '''The control field and its bits are in the CSM_ENCAPS tree
+        (they were added to the parent tree before the fix).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csm_encaps_coverage.pcap.gz'),
+                '-Y', 'frame.number == 2',
+                '-V', '-O', 'csm_encaps',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        start = lines.index('CSM_ENCAPS')
+        assert lines[start + 1:start + 7] == [
+            '    Opcode: Control Packet (0x0001)',
+            '    Sequence Number: 2',
+            '    Control: 0xa0, Packet Bit',
+            '        1... .... = Packet Bit: ACK Packet',
+            '        .0.. .... = ACK Suppress Bit: ACK Required',
+            '        .... ...0 = Endian Bit: Big Endian',
+        ]
+
+    def test_csm_encaps_info(self, cmd_tshark, capture_file, test_env):
+        '''ACKs to and from the host, responses (to the host) and other
+        messages (from the host), named by function code or, for function
+        code 0, by class and type.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csm_encaps_coverage.pcap.gz'),
+                '-Tfields', '-eframe.number', '-ecsm_encaps.opcode',
+                '-ecsm_encaps.ctrl', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert [' '.join(l.split()) for l in stdout.splitlines()] == [
+            '1 0x0001 0x80 --> ACK Ch: 0x0001, Seq: 1 (From Host)',
+            '2 0x0001 0xa0 <-- ACK Ch: 0x0001, Seq: 2 (To Host)',
+            '3 0x0001 0x00 --> 0x8004 Ch: 0x0002, Seq: 3 (From Host)',
+            '4 0x0001 0x00 <-- 0x8004 Ch: 0x0002, Seq: 3 (To Host)',
+            '5 0x0001 0x40 --> 0x1200 Ch: 0xFFFF, Seq: 4 (From Host)',
+            '6 0x0001 0x41 --> 0x0101 Ch: 0x0003, Seq: 5 (From Host)',
+            '7 0x0001 0x00 --> 0x0202 Ch: 0x0003, Seq: 6 (From Host)',
+            '8 0x0000 0x00 --> 0x0000 Ch: 0x0000, Seq: 7 (From Host)',
+            '9 0x0002 0x00 --> 0x0303 Ch: 0x0004, Seq: 8 (From Host)',
+            '10 0x00ff 0x80 --> ACK Ch: 0x0004, Seq: 9 (From Host)',
+            '11 0x0001 0x00 <-- 0x0404 Ch: 0x0005, Seq: 10 (To Host)',
+            '12 0x0001 0x20 --> 0x0404 Ch: 0x0005, Seq: 11 (From Host)',
+            '13 0x0001 0x00 <-- 0x0502 Ch: 0x0006, Seq: 12 (To Host)',
+        ]
+
+    def test_csm_encaps_params(self, cmd_tshark, capture_file, test_env):
+        '''The parameters follow the length field: none for a length of 6
+        or less, the error code as parameter 1 of a response, parameters
+        1-40 and then plain "Parameter" items.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csm_encaps_coverage.pcap.gz'),
+                '-Tfields', '-eframe.number', '-ecsm_encaps.length',
+                '-ecsm_encaps.reserved', '-ecsm_encaps.param1',
+                '-ecsm_encaps.param2', '-ecsm_encaps.param40',
+                '-ecsm_encaps.param',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert lines[0:10] == [
+            '1\t6\t\t\t\t\t',
+            '2\t6\t\t\t\t\t',
+            '3\t14\t0x0000\t0x0011\t0x0022\t\t',
+            '4\t10\t0x0000\t0x0005\t\t\t',
+            '5\t8\t0x0000\t\t\t\t',
+            '6\t6\t\t\t\t\t',
+            '7\t0\t\t\t\t\t',
+            '8\t6\t\t\t\t\t',
+            '9\t11\t0x0000\t0x1111\t0x2222\t\t',
+            '10\t10\t0x0000\t0x0007\t\t\t',
+        ]
+        params = lines[10].split('\t')
+        assert params[0:6] == ['11', '255', '0x0100', '0x0101', '0x0102', '0x0128']
+        assert params[6].split(',') == ['0x%04x' % v for v in range(0x129, 0x17d)]
+        assert lines[11] == '12\t88\t0x0100\t0x0101\t0x0102\t0x0128\t'
+        assert lines[12] == '13\t10\t0x0000\t0x0009\t\t\t'
