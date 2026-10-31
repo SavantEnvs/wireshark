@@ -31211,3 +31211,129 @@ class TestDissectDap:
         # context present; then the present items of the extended filter
         # and the join filter
         assert stdout.strip().split(',') == ['0', '1', '2', '3', '4', '5', '6', '7', '4', '4']
+
+
+class TestDissectDarwin:
+    def test_darwin_frames(self, cmd_tshark, capture_file, test_env):
+        '''33 frames, 32 with Darwin data; no malformed packets and no
+        expert infos in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('darwin_coverage.pcapng.gz'),
+                '-Tfields', '-eframe.protocols',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.splitlines()
+        assert len(protocols) == 33
+        assert protocols[0] == 'eth:ethertype:ip:udp:data'
+        assert protocols[1:] == ['darwin:eth:ethertype:ip:udp:data'] * 32
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('darwin_coverage.pcapng.gz'),
+                    '-Y', '_ws.malformed || _ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_darwin_process_info(self, cmd_tshark, capture_file, test_env):
+        '''The process and the effective process from the Darwin Process
+        Info Blocks: named and unnamed, the effective process left out
+        when it is the same DPIB or has the same process ID, and only an
+        effective process (the process is then DPIB 0).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('darwin_coverage.pcapng.gz'),
+                '-Y', 'frame.darwin.process_info',
+                '-Tfields', '-eframe.number',
+                '-eframe.darwin.process_info.pid',
+                '-eframe.darwin.process_info.pname',
+                '-eframe.darwin.process_info.epid',
+                '-eframe.darwin.process_info.epname',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '2\t100\tSafari\t\t',
+            '3\t100\tSafari\t\t',
+            '4\t100\tSafari\t200\tnsurlsessiond',
+            '5\t300\t\t\t',
+            '6\t300\t\t400\tmDNSResponder',
+            '7\t100\tSafari\t300\t',
+            '8\t200\tnsurlsessiond\t\t',
+            '9\t100\tSafari\t400\tmDNSResponder',
+            '29\t100\tSafari\t200\tnsurlsessiond',
+            '33\t400\tmDNSResponder\t\t',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('darwin_coverage.pcapng.gz'),
+                '-Y', 'frame.number in {1..9}',
+                '-o', 'gui.column.format:"No.","%m","PID","%Pi","Process","%Pn"',
+            ), encoding='utf-8', env=test_env)
+        assert [l.split() for l in stdout.splitlines()] == [
+            ['1'], ['2', '100', 'Safari'], ['3', '100', 'Safari'],
+            ['4', '100', 'Safari'], ['5', '300'], ['6', '300'],
+            ['7', '100', 'Safari'], ['8', '200', 'nsurlsessiond'],
+            ['9', '100', 'Safari'],
+        ]
+
+    def test_darwin_metadata(self, cmd_tshark, capture_file, test_env):
+        '''The summary of the Darwin metadata with every item first and
+        after another one, every flag, service classes and drops.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('darwin_coverage.pcapng.gz'),
+                '-Y', 'frame.darwin',
+                '-V', '-O', 'frame',
+            ), encoding='utf-8', env=test_env)
+        summaries = [l.strip() for l in stdout.splitlines() if 'Darwin Metadata:' in l]
+        assert summaries == [
+            '[Darwin Metadata: flags=WCSRKN]',
+            '[Darwin Metadata: flags=......]',
+            '[Darwin Metadata: flags=.C.R.N]',
+            '[Darwin Metadata: sc=BE]',
+            '[Darwin Metadata: sc=VO]',
+            '[Darwin Metadata: sc=Unknown]',
+            '[Darwin Metadata: fi=deadbeef]',
+            '[Darwin Metadata: trace=abcd]',
+            '[Darwin Metadata: gencnt=7]',
+            '[Darwin Metadata: drop fsw_rx_ring_enqueue:1234 0x1010002 (Flowswitch Rx destination ring full)]',
+            '[Darwin Metadata: drop 77]',
+            '[Darwin Metadata: drop tcp_input]',
+            '[Darwin Metadata: drop 0x2010001 (TCP connection reset)]',
+            '[Darwin Metadata: drop 0x20a0001 (Bridge unspecified reason)]',
+            '[Darwin Metadata: drop 0x1050001 (AQM full)]',
+            '[Darwin Metadata: drop 0x1023333 (Unknown)]',
+            '[Darwin Metadata: drop 0x2550001 (Unknown)]',
+            '[Darwin Metadata: drop 0x0 (Drop reason not specified)]',
+            '[Darwin Metadata: drop 0x3010001 (Unknown)]',
+            '[Darwin Metadata: flags=W...K.; sc=CTL; fi=1234; trace=42; drop ip_output:99 0x2030001 (Unknown); gencnt=3]',
+            '[Darwin Metadata: sc=BK; trace=1]',
+            '[Darwin Metadata: fi=5; drop 0x2070001 (IPv6 discard option)]',
+            '[Darwin Metadata: trace=2; gencnt=9]',
+            '[Darwin Metadata: sc=OAM; fi=6]',
+        ]
+        # (the Reserved bit 31 of frame 10 is not shown, see README)
+        flags = [l.strip() for l in stdout.split('\n\n')[0].splitlines()
+                 if l.startswith('            ') and 'Reserved' not in l]
+        assert flags == [
+            '.... .... .... .... .... .... ..1. .... = Wake Packet(wk): Set',
+            '.... .... .... .... .... .... ...1 .... = Nexus Channel(ch): Set',
+            '.... .... .... .... .... .... .... 1... = Socket(so): Set',
+            '.... .... .... .... .... .... .... .1.. = ReXmit(re): Set',
+            '.... .... .... .... .... .... .... ..1. = Keep Alive(ka): Set',
+            '.... .... .... .... .... .... .... ...1 = New Flow(nf): Set',
+        ]
+
+    def test_darwin_drop(self, cmd_tshark, capture_file, test_env):
+        '''The drop reason code is split into component and domain.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('darwin_coverage.pcapng.gz'),
+                '-Y', 'frame.darwin.drop.reason_code && frame.number != 26',
+                '-Tfields', '-eframe.number', '-eframe.darwin.drop.reason',
+                '-eframe.darwin.drop.component', '-eframe.darwin.drop.domain',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '19\tFlowswitch Rx destination ring full\tSkywalk\tfsw',
+            '22\tTCP connection reset\tBSD\tTCP',
+            '23\tBridge unspecified reason\tBSD\tbridge',
+            '24\tAQM full\tSkywalk\tAQM',
+            '25\tUnknown\tSkywalk\tnetif',
+            '27\tDrop reason not specified\t\t',
+            '28\tUnknown\t\t',
+            '29\tUnknown\tBSD\tIPv4',
+            '31\tIPv6 discard option\tBSD\tIPv6',
+        ]
