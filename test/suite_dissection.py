@@ -32045,3 +32045,106 @@ class TestDissectDccp:
             '40012\t17\tICMP\t',
             '40012\t17\tICMP\t71756f746564',
         ]
+
+
+class TestDissectDcerpcAtsvc:
+    def test_atsvc_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Frame counts: three connections (NDR little endian, big endian,
+        NDR64) with a bind and 9 calls each (plus an unknown opnum in the
+        first), and no malformed packets or warnings in one and two
+        passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcerpc_atsvc_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 80
+        assert protocols.count('ATSVC') == 56
+        assert protocols.count('DCERPC') == 6
+        assert protocols.count('TCP') == 18
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('dcerpc_atsvc_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= "Warning"',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_atsvc_bind(self, cmd_tshark, capture_file, test_env):
+        '''The three binds: byte order and transfer syntax.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcerpc_atsvc_coverage.pcap.gz'),
+                '-Y', 'dcerpc.pkt_type == 11',
+                '-Tfields', '-edcerpc.drep.byteorder', '-edcerpc.cn_bind_to_uuid',
+                '-edcerpc.cn_bind_if_ver', '-edcerpc.cn_bind_trans_id',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\t1ff70682-0a51-30e8-076d-740be8cee98b\t1\t8a885d04-1ceb-11c9-9fe8-08002b104860',
+            '0\t1ff70682-0a51-30e8-076d-740be8cee98b\t1\t8a885d04-1ceb-11c9-9fe8-08002b104860',
+            '1\t1ff70682-0a51-30e8-076d-740be8cee98b\t1\t71710533-beba-4937-8319-b5dbef9ccc36',
+        ]
+
+    def test_atsvc_calls(self, cmd_tshark, capture_file, test_env):
+        '''Every opnum, server names, job IDs and status codes; the same
+        in all three connections.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcerpc_atsvc_coverage.pcap.gz'),
+                '-Y', 'atsvc',
+                '-Tfields', '-eatsvc.opnum', '-eatsvc.server', '-eatsvc.job_id',
+                '-eatsvc.status', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert len(lines) == 56
+        calls = [
+            '0\t\\\\\\\\SERVER\t\t\tJobAdd request',
+            '0\t\t7\t0x00000000\tJobAdd response',
+            '0\t\t\t\tJobAdd request',
+            '0\t\t0\t0xc0000022\tJobAdd response, STATUS_ACCESS_DENIED, Error: STATUS_ACCESS_DENIED',
+            '0\tS\t\t\tJobAdd request',
+            '0\t\t8\t0x00000000\tJobAdd response',
+            '1\t\\\\\\\\SERVER\t\t\tJobDel request',
+            '1\t\t\t0x00000000\tJobDel response',
+            '1\t\t\t\tJobDel request',
+            '1\t\t\t0xc0000034\tJobDel response, STATUS_OBJECT_NAME_NOT_FOUND, Error: STATUS_OBJECT_NAME_NOT_FOUND',
+            '2\t\\\\\\\\SERVER\t\t\tJobEnum request',
+            '2\t\t7,8\t0x00000000\tJobEnum response',
+            '2\t\t\t\tJobEnum request',
+            '2\t\t\t0x80000005\tJobEnum response, STATUS_BUFFER_OVERFLOW, Error: STATUS_BUFFER_OVERFLOW',
+            '3\t\\\\\\\\SERVER\t7\t\tJobGetInfo request',
+            '3\t\t\t0x00000000\tJobGetInfo response',
+            '3\t\t99\t\tJobGetInfo request',
+            '3\t\t\t0xc0000034\tJobGetInfo response, STATUS_OBJECT_NAME_NOT_FOUND, Error: STATUS_OBJECT_NAME_NOT_FOUND',
+        ]
+        assert lines[0:18] == calls
+        assert lines[18:20] == ['4\t\t\t\tUnknown operation 4 request',
+                                '4\t\t\t\tUnknown operation 4 response']
+        assert lines[20:38] == calls
+        assert lines[38:56] == calls
+
+    def test_atsvc_job_info(self, cmd_tshark, capture_file, test_env):
+        '''JobInfo with every bit, no bit and unknown bits, the JobEnum
+        entries and the JobDel and JobEnum arguments, in NDR64 (the
+        third connection).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcerpc_atsvc_coverage.pcap.gz'),
+                '-Y', 'atsvc && tcp.port == 50003',
+                '-Tfields', '-eatsvc.atsvc_JobInfo.job_time',
+                '-eatsvc.atsvc_JobInfo.days_of_month',
+                '-eatsvc.atsvc_JobInfo.days_of_week', '-eatsvc.atsvc_JobInfo.flags',
+                '-eatsvc.atsvc_JobInfo.command',
+                '-eatsvc.atsvc_JobEnumInfo.days_of_month',
+                '-eatsvc.atsvc_JobEnumInfo.command',
+                '-eatsvc.atsvc_JobDel.max_job_id',
+                '-eatsvc.atsvc_JobEnum.preferred_max_len',
+                '-eatsvc.atsvc_JobEnum.total_entries',
+            ), encoding='utf-8', env=test_env)
+        lines = [l.split('\t') for l in stdout.splitlines()]
+        assert lines[0][0:5] == ['3600000', '0x7fffffff', '0x7f', '0x1f', 'backup.cmd']
+        assert lines[2][0:5] == ['0', '0x00000000', '0x00', '0x00', '']
+        assert lines[4][0:5] == ['86399999', '0x80000001', '0x81', '0x21', 'x']
+        assert lines[8][7] == '4294967295'
+        assert lines[10][8] == '4294967295'
+        assert lines[11][5:7] == ['0x00000001,0x40000000', 'backup.cmd']
+        assert lines[11][9] == '2'
+        assert lines[12][8] == '4096'
+        assert lines[15][0:5] == ['3600000', '0x00000003', '0x03', '0x05', 'backup.cmd']
