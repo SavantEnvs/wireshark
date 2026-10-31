@@ -30631,3 +30631,163 @@ class TestDissectCsn1:
             '184\t\t7\t\t\t\tSTREAM NOT SUPPORTED (NC_Measurements)',
             '185\t\t0\t8\t\t\tSTREAM NOT SUPPORTED (Measurements_3G)',
         ]
+
+
+class TestDissectCtdb:
+    def test_ctdb_protocols(self, cmd_tshark, capture_file, test_env):
+        '''CTDB over TCP, found by the heuristic, decodes without
+        malformed packets or warnings, in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('ctdb_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 64
+        assert protocols.count('CTDB') == 50
+        assert protocols.count('TCP') == 14
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('ctdb_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_ctdb_info(self, cmd_tshark, capture_file, test_env):
+        '''Every opcode in both byte orders and the controls with their
+        decoded values in the Info column.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('ctdb_coverage.pcap.gz'),
+                '-Y', 'ctdb',
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '4\tREQ_CALL 1->0 IMMEDIATE',
+            '5\tREQ_DMASTER 0->2',
+            '6\tREPLY_DMASTER 0->1',
+            '7\tREPLY_CALL 0->1',
+            '8\tREQ_CALL 1->0',
+            '9\tREPLY_CALL 0->1',
+            '10\tPROCESS_EXISTS Request 1->0 pid:4711',
+            '11\tPROCESS_EXISTS Reply 0->1',
+            '12\tPROCESS_EXISTS Request 1->0 pid:4712',
+            '13\tPROCESS_EXISTS Reply 0->1',
+            '14\tGET_RECMODE Request 1->0',
+            '15\tGET_RECMODE Reply 0->1 RecMode:NORMAL',
+            '16\tGET_RECMODE Request 1->0',
+            '17\tGET_RECMODE Reply 0->1 RecMode:RECOVERY ACTIVE',
+            '18\tGET_RECMODE Request 1->0',
+            '19\tGET_RECMODE Reply 0->1 RecMode:Unknown:5',
+            '20\tGET_RECMASTER Request 1->0',
+            '21\tGET_RECMASTER Reply 0->1 RecMaster:2',
+            '22\tGET_NODEMAP Request 1->0',
+            '23\tGET_NODEMAP Reply 0->1',
+            '24\tGET_NODEMAP Request 1->0',
+            '25\tGET_NODEMAP Reply 0->1',
+            '26\tFREEZE Request 1->0',
+            '27\tFREEZE Reply 0->1',
+            '28\tTHAW Request 1->0',
+            '29\tTHAW Reply 0->1',
+            '30\tSTATISTICS Request 1->0',
+            '31\tSTATISTICS Reply 0->1',
+            '32\tUnknown:999 Request 1->0',
+            '33\tUnknown:999 Reply 0->1',
+            '34\tREPLY_CONTROL 0->1',
+            '35\tREPLY_ERROR 0->1',
+            '36\tREQ_MESSAGE 1->0',
+            '37\tREQ_KEEPALIVE 1->0',
+            '38\tUnknown:42 0->1',
+            '42\tREQ_CALL 2->0 IMMEDIATE',
+            '43\tREQ_DMASTER 0->1',
+            '44\tREPLY_DMASTER 1->2',
+            '45\tREPLY_CALL 0->2',
+            '46\tPROCESS_EXISTS Request 2->0 pid:99',
+            '47\tPROCESS_EXISTS Reply 0->2',
+            '48\tGET_NODEMAP Request 2->0',
+            '49\tGET_NODEMAP Reply 0->2',
+            '50\tGET_RECMASTER Request 2->0',
+            '51\tGET_RECMASTER Reply 0->2 RecMaster:0',
+            '55\tPROCESS_EXISTS Request 1->0 pid:5000',
+            '56\tGET_RECMODE Request 1->0',
+            '57\tGET_RECMODE Reply 0->1 RecMode:RECOVERY ACTIVE',
+            '63\tPROCESS_EXISTS Request 1->2 pid:1234',
+            '64\tGET_RECMODE Request 1->2',
+        ]
+
+    def test_ctdb_transactions(self, cmd_tshark, capture_file, test_env):
+        '''A call with its dmaster migration in both byte orders: the
+        request is linked to the REPLY_DMASTER (with -2 in both
+        directions), and the key hash is the same in all three.'''
+        stdout = subprocess.check_output((cmd_tshark, '-2',
+                '-r', capture_file('ctdb_coverage.pcap.gz'),
+                '-Y', 'ctdb.opcode <= 3',
+                '-Tfields', '-eframe.number', '-ectdb.opcode', '-ectdb.id',
+                '-ectdb.request_in', '-ectdb.response_in', '-ectdb.keyhash',
+                '-ectdb.dbid', '-ectdb.rsn',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '4\t0\t100\t\t6\t0xdc0fa488\t0x42fe72c5\t',
+            '5\t2\t100\t4\t6\t0xdc0fa488\t0x42fe72c5\t0x0000000000000010',
+            '6\t3\t100\t4\t\t0xdc0fa488\t0x42fe72c5\t0x0000000000000011',
+            '7\t1\t100\t\t\t\t\t',
+            '8\t0\t101\t\t\t0x00003039\t0x12345678\t',
+            '9\t1\t101\t\t\t\t\t',
+            '42\t0\t300\t\t44\t0xb09ff52b\t0x435d3410\t',
+            '43\t2\t300\t42\t44\t0xb09ff52b\t0x435d3410\t0x0000000000000100',
+            '44\t3\t300\t42\t\t0xb09ff52b\t0x435d3410\t0x0000000000000101',
+            '45\t1\t300\t\t\t\t\t',
+        ]
+
+    def test_ctdb_controls(self, cmd_tshark, capture_file, test_env):
+        '''Control requests and replies matched by request id and nodes,
+        with the decoded PID, process status, recovery mode and master and
+        node maps.'''
+        stdout = subprocess.check_output((cmd_tshark, '-2',
+                '-r', capture_file('ctdb_coverage.pcap.gz'),
+                '-Y', 'ctdb.ctrl_opcode && frame.number <= 51',
+                '-Tfields', '-eframe.number', '-ectdb.ctrl_opcode',
+                '-ectdb.request_in', '-ectdb.response_in', '-ectdb.pid',
+                '-ectdb.process_exists', '-ectdb.recmode', '-ectdb.recmaster',
+                '-ectdb.num_nodes', '-ectdb.vnn', '-ectdb.node_ip',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert len(lines) == 30
+        assert lines[0:8] == [
+            '10\t0\t\t11\t4711\t\t\t\t\t\t',
+            '11\t0\t10\t\t\tFalse\t\t\t\t\t',
+            '12\t0\t\t13\t4712\t\t\t\t\t\t',
+            '13\t0\t12\t\t\tTrue\t\t\t\t\t',
+            '14\t15\t\t15\t\t\t\t\t\t\t',
+            '15\t15\t14\t\t\t\t0\t\t\t\t',
+            '16\t15\t\t17\t\t\t\t\t\t\t',
+            '17\t15\t16\t\t\t\t1\t\t\t\t',
+        ]
+        assert lines[11] == '21\t31\t20\t\t\t\t\t2\t\t\t'
+        assert lines[13] == '23\t91\t22\t\t\t\t\t\t3\t0,1,2\t192.0.2.10,192.0.2.11,192.0.2.12'
+        assert lines[15] == '25\t91\t24\t\t\t\t\t\t0\t\t'
+        assert lines[22:24] == [
+            '32\t999\t\t33\t\t\t\t\t\t\t',
+            '33\t999\t32\t\t\t\t\t\t\t\t',
+        ]
+        assert lines[27] == '49\t91\t48\t\t\t\t\t\t2\t0,2\t192.0.2.10,192.0.2.12'
+
+    def test_ctdb_req_control_twopass(self, cmd_tshark, capture_file, test_env):
+        '''Two control requests with the same request id and nodes (frames
+        55/56, and the reproducer ctdb_req_control_twopass.py in frames
+        63/64): each is decoded with its own opcode on the second pass
+        too, and the reply goes to the later request, as fixed in "CTDB:
+        Decode a control request with its own opcode on every pass".'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('ctdb_coverage.pcap.gz'),
+                    '-Y', 'frame.number >= 55 && ctdb',
+                    '-Tfields', '-eframe.number', '-ectdb.ctrl_opcode',
+                    '-ectdb.pid', '-ectdb.request_in', '-ectdb.recmode',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.splitlines() == [
+                '55\t0\t5000\t\t',
+                '56\t15\t\t\t',
+                '57\t15\t\t56\t1',
+                '63\t0\t1234\t\t',
+                '64\t15\t\t\t',
+            ]
