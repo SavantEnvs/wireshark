@@ -27685,3 +27685,237 @@ class TestDissectCnip:
         assert lines[0] == '6\t0x63\t12'
         assert lines[11] == '17\t0x60\t'
         assert lines[13] == '19\t0x55\t2'
+
+
+class TestDissectCoap:
+    # The OSCORE security contexts the capture was encrypted with
+    oscore_contexts = (
+        '-o', 'uat:oscore_contexts:"01","02","0102030405060708090a0b0c0d0e0f10","","","AES-CCM-16-64-128 (CCM*)"',
+        '-o', 'uat:oscore_contexts:"0a","0b","101112131415161718191a1b1c1d1e1f","9e7ca92223786340","37cbf3210017a2d3","AES-CCM-16-64-128 (CCM*)"',
+    )
+
+    def test_coap_protocols(self, cmd_tshark, capture_file, test_env):
+        '''The frame counts per protocol, no malformed packets or errors in
+        one and two passes, and warnings only for the vendor option and
+        the reproducer of the OSCORE Partial IV length check.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                *self.oscore_contexts,
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 101
+        assert protocols.count('CoAP') == 71
+        assert protocols.count('OSCORE') == 8
+        assert protocols.count('CoAP/JSON') == 1
+        assert protocols.count('CoAP-EAP') == 1
+        assert protocols.count('SGP.32') == 1
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('coap_coverage.pcapng.gz'),
+                    *self.oscore_contexts,
+                    '-Y', '_ws.malformed || _ws.expert.severity == error',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+            # some field errors only show in the full tree
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('coap_coverage.pcapng.gz'),
+                    *self.oscore_contexts,
+                    '-V',
+                ), encoding='utf-8', env=test_env)
+            assert 'Malformed Packet' not in stdout
+            assert 'Expert Info (Error' not in stdout
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('coap_coverage.pcapng.gz'),
+                    *self.oscore_contexts,
+                    '-Y', '_ws.expert.severity == warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.split() == ['26', '58', '59']
+
+    def test_coap_udp_info(self, cmd_tshark, capture_file, test_env):
+        '''Message types, codes, tokens, the URI built from Uri-Host,
+        Uri-Port, Uri-Path and Uri-Query, and retransmissions.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                '-Y', 'frame.number <= 14',
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\tCON, MID:4097, GET, TKN:01 02 03 04, coap://sensor.example:5683/sensors/temp?unit=c&fmt=1',
+            '2\tACK, MID:4097, 2.05 Content, TKN:01 02 03 04, coap://sensor.example:5683/sensors/temp, JSON (application/json)',
+            '3\tCON, MID:4097, GET, TKN:01 02 03 04, coap://sensor.example:5683/sensors/temp?unit=c&fmt=1 [Retransmission]',
+            '4\tCON, MID:4098, GET, TKN:a1, /slow',
+            '5\tACK, MID:4098, Empty Message',
+            '6\tCON, MID:28673, 2.05 Content, TKN:a1, /slow (text/plain)',
+            '7\tCON, MID:28673, 2.05 Content, TKN:a1, /slow [Retransmission] (text/plain)',
+            '8\tACK, MID:28673, Empty Message',
+            '9\tNON, MID:4099, PUT, /cfg (text/plain)',
+            '10\tNON, MID:4099, 2.04 Changed, /cfg',
+            '11\tCON, MID:4100, POST, TKN:b1 b2, /things',
+            '12\tACK, MID:4100, 2.01 Created, TKN:b1 b2, /things',
+            '13\tCON, MID:4101, DELETE, TKN:c1, coap://[2001:db8::1]:0/',
+            '14\tACK, MID:4101, 2.02 Deleted, TKN:c1, coap://[2001:db8::1]:0/',
+        ]
+
+    def test_coap_options(self, cmd_tshark, capture_file, test_env):
+        '''Options with extended deltas and lengths (Proxy-Uri of 304
+        octets, OCF versions above option 2048) and the vendor option.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                '-Y', 'frame.number in {15,25,26}',
+                '-Tfields', '-eframe.number', '-ecoap.opt.delta_ext',
+                '-ecoap.opt.length_ext', '-ecoap.opt.proxy_scheme',
+                '-ecoap.opt.opt_ocf_accept_version',
+                '-ecoap.opt.opt_ocf_version', '-ecoap.opt.unknown',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '15\t10\t35\tcoap\t\t\t',
+            '25\t1752\t\t\t2048\t\t',
+            '26\t3,1756\t\t\t\t4163\tbeef',
+        ]
+
+    def test_coap_tracking(self, cmd_tshark, capture_file, test_env):
+        '''Requests and responses matched by token (or by message ID), and
+        retransmitted requests and responses, in two passes.'''
+        stdout = subprocess.check_output((cmd_tshark, '-2',
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                '-Y', 'frame.number <= 14',
+                '-Tfields', '-eframe.number', '-ecoap.response_in',
+                '-ecoap.response_to', '-ecoap.request_first_in',
+                '-ecoap.response_first_in',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\t2\t\t\t',
+            '2\t\t1\t\t',
+            '3\t2\t\t1\t',
+            '4\t\t\t\t',
+            '5\t\t\t\t',
+            '6\t\t\t\t',
+            '7\t\t\t\t6',
+            '8\t\t\t\t',
+            '9\t10\t\t\t',
+            '10\t\t9\t\t',
+            '11\t12\t\t\t',
+            '12\t\t11\t\t',
+            '13\t14\t\t\t',
+            '14\t\t13\t\t',
+        ]
+
+    def test_coap_blocks(self, cmd_tshark, capture_file, test_env):
+        '''Block2, Block1, Q-Block2 and Q-Block1 transfers over UDP and a
+        BERT Block2 transfer over TCP are reassembled.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                '-Y', 'coap.block.reassembled.length',
+                '-Tfields', '-eframe.number', '-ecoap.block',
+                '-ecoap.block.reassembled.length',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '35\t31,33,35\t137',
+            '40\t36,38,40\t69',
+            '44\t43,44\t20',
+            '46\t45,46\t19',
+            '81\t79,81\t1034',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                '-Y', 'frame.number == 35',
+                '-x',
+            ), encoding='utf-8', env=test_env)
+        assert 'Reassembled CoAP blocks (137 bytes)' in stdout
+
+    def test_coap_oscore(self, cmd_tshark, capture_file, test_env):
+        '''OSCORE requests and responses (with and without their own Partial
+        IV, with a kid context) decrypt and their tags verify.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                *self.oscore_contexts,
+                '-Y', 'frame.number in {52..57}',
+                '-Tfields', '-eframe.number', '-eoscore.tag',
+                '-eoscore.code', '-eoscore.opt.uri_path_recon',
+                '-ecoap.oscore_piv', '-eoscore.payload_length',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '52\ta7367fb5d0951dc8\t1\t\t\t',
+            '53\teaee3fe4a68dd49f\t69\t\t05\t12',
+            '54\t3ee2767f611ec5dc\t1\t\t\t',
+            '55\t7b2b9e48a15eed69\t69\t\t01\t2',
+            '56\t1d643700ed9e4ad6\t3\t\t\t16',
+            '57\td9f449e16bd2cdca\t68\t\t14\t',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                *self.oscore_contexts,
+                '-Y', 'frame.number == 52',
+                '-Tfields', '-eoscore.opt.uri_path', '-eoscore.opt.uri_query',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.strip() == 'oscore,hello\tfirst=1'
+
+    def test_coap_oscore_piv_length(self, cmd_tshark, capture_file, test_env):
+        '''A request Partial IV of 7 octets is rejected for the request and
+        for the response without its own Partial IV (the response
+        asserted in OSCORE before the fix).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                *self.oscore_contexts,
+                '-Y', 'frame.number in {58..59}',
+                '-Tfields', '-eframe.number',
+                '-ecoap.opt.object_security_piv',
+                '-ecoap.opt.object_security_kid', '-e_ws.expert.message',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '58\t01020304050607\t01\tPartial IV length from the lower layer is invalid',
+            '59\t\t\tPartial IV length from the lower layer is invalid',
+        ]
+
+    def test_coap_tcp_websockets(self, cmd_tshark, capture_file, test_env):
+        '''CoAP over TCP with every length size, split over segments and
+        followed by another message, and CoAP over WebSockets.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                '-Y', 'coap.length',
+                '-Tfields', '-eframe.number', '-ecoap.length',
+                '-ecoap.code', '-ecoap.payload_length',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '63\t2\t225\t',
+            '64\t2\t225\t',
+            '65\t12\t1\t',
+            '66\t26\t69\t20',
+            # the payload ends where the message ends, before the Ping
+            '67\t315\t2\t300',
+            '68\t4\t68\t',
+            '71\t55\t3\t40',
+            '72\t3\t68\t',
+            '73\t11\t1\t',
+            '77\t66009\t69\t66000',
+            '78\t13\t1\t',
+            '79\t1033\t69\t',
+            '80\t13\t1\t',
+            '81\t18\t69\t1034',
+            '82\t2\t228\t',
+            '83\t6\t229\t3',
+            '92\t0\t225\t',
+            '93\t0\t1\t',
+            '94\t0\t69\t15',
+            '99\t4\t1\t',
+        ]
+
+    def test_coap_exported_pdu(self, cmd_tshark, capture_file, test_env):
+        '''CoAP in Exported PDUs with a TCP port type but no TCP
+        conversation (this asserted before the fix), and CoAP for Thread
+        Management Framework handing its payload to Thread.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_coverage.pcapng.gz'),
+                '-Y', 'frame.number >= 98',
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+                '-ethread_address.tlv.target_eid',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '98\tCON, MID:1, GET, /a\t',
+            '99\tGET, /a\t',
+            '100\tCON, MID:8193, POST, TKN:51 52, /a/aq\tfd00:db8::ff00:fe00:1234',
+            '101\tACK, MID:8193, 2.04 Changed, TKN:51 52, /a/aq\t',
+        ]
