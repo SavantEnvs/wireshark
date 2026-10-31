@@ -255,7 +255,7 @@ calcappprotocol_stat_packet(void* tapdata, packet_info* pinfo _U_, epan_dissect_
 
     msg_data = stat_tap_get_field_data(table, i, BYTES_SHARE_COLUMN);
     msg_data->type = TABLE_ITEM_FLOAT;
-    msg_data->value.float_value = 100.0 * b / (double)calcappprotocol_total_bytes;
+    msg_data->value.float_value = calcappprotocol_total_bytes ? 100.0 * b / (double)calcappprotocol_total_bytes : 0.0;
     stat_tap_set_field_data(table, i, BYTES_SHARE_COLUMN, msg_data);
     i++;
   }
