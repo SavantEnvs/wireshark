@@ -28528,3 +28528,198 @@ class TestDissectComponentStatus:
             ), encoding='utf-8', env=test_env)
         assert ('ComponentStatus Report    |1 |100.000 % |0 |0.000 % |' in stdout
                 or 'ComponentStatus Report    |1 |100,000 % |0 |0,000 % |' in stdout)
+
+
+class TestDissectCops:
+    def test_cops_protocols(self, cmd_tshark, capture_file, test_env):
+        '''COPS, COPS-PR, PacketCable D-QoS and Multimedia messages decode
+        without malformed packets or error expert infos, in one and two
+        passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cops_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol', '-ecops.client_type',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert len(lines) == 60
+        assert [l.split('\t')[0] for l in lines].count('COPS') == 58
+        # The first two segments of a reassembled message
+        assert [l.split('\t')[0] for l in lines[27:29]] == ['TCP', 'TCP']
+        clients = [l.split('\t')[1] for l in lines]
+        assert clients.count('1') == 29     # RSVP, and one frame with two messages
+        assert clients.count('1,1') == 1
+        assert clients.count('2') == 6      # DiffServ (COPS-PR)
+        assert clients.count('32778') == 15  # PacketCable Multimedia
+        assert clients.count('32776') == 7   # PacketCable D-QoS
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cops_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity == error',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cops_packetcable_object_bounds(self, cmd_tshark, capture_file, test_env):
+        '''A PacketCable Multimedia decision with a Gate ID followed by an
+        Error object: the Error object is shown and the packet is not
+        malformed. The PacketCable analysis used to run to the end of the
+        message (frame 39, from "COPS: Keep PacketCable analysis inside
+        its object, fix the CPERR summary").'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cops_coverage.pcap.gz'),
+                '-Y', 'frame.number == 39',
+                '-Tfields', '-ecops.pc_gate_id', '-ecops.error',
+                '-ecops.error_sub', '-e_ws.malformed', '-e_ws.expert',
+            ), encoding='utf-8', env=test_env)
+        assert stdout == '0x11223344\t1\t0x0000\t\t\n'
+
+    def test_cops_cperr_summary(self, cmd_tshark, capture_file, test_env):
+        '''The summary of a CPERR object shows the CPERR code and
+        sub-code (frame 38), not the GPERR ones (always 0 there).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cops_coverage.pcap.gz'),
+                '-Y', 'frame.number == 38',
+                '-V', '-O', 'cops',
+            ), encoding='utf-8', env=test_env)
+        assert 'Contents: Error-Code: priInstanceInvalid, Error Sub-code: 0x0007' in stdout
+        assert '<Unknown value>' not in stdout
+
+    def test_cops_request_response(self, cmd_tshark, capture_file, test_env):
+        '''Requests and responses are matched by handle: REQ/DEC,
+        DEC/RPT, DEC/DRQ, SSQ/RPT, SSQ/DRQ, SSQ/SSC, OPN/CAT, OPN/CC and
+        KA/KA, also across reassembly; a response for an unknown handle,
+        a second KA, an RPT after a REQ and a DEC with the timestamp of
+        its REQ are not matched.'''
+        stdout = subprocess.check_output((cmd_tshark, '-2',
+                '-r', capture_file('cops_coverage.pcap.gz'),
+                '-Y', 'cops.response_in || cops.response_to',
+                '-Tfields', '-eframe.number', '-ecops.response_in',
+                '-ecops.response_to',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\t2\t', '2\t\t1', '3\t4\t', '4\t5\t3', '5\t\t4', '6\t7\t',
+            '7\t\t6', '9\t10\t', '10\t\t9', '11\t12\t', '12\t\t11',
+            '13\t14\t', '14\t\t13', '15\t16\t', '16\t\t15', '21\t22\t',
+            '22\t\t21', '27\t32\t', '30\t31\t', '31\t\t30', '32\t\t27',
+            '33\t34\t', '34\t\t33', '35\t36\t', '36\t37\t35', '37\t\t36',
+            '40\t41\t', '41\t\t40', '42\t43\t', '43\t\t42', '52\t53\t',
+            '53\t\t52', '54\t55\t', '55\t\t54', '56\t57\t', '57\t\t56',
+        ]
+
+    def test_cops_reassembly(self, cmd_tshark, capture_file, test_env):
+        '''A 628 octet REQ over three segments, two REQs in one segment,
+        and a DEC whose segment also starts the next DEC.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cops_coverage.pcap.gz'),
+                '-Y', 'frame.number >= 27 && frame.number <= 32',
+                '-Tfields', '-eframe.number', '-ecops.handle',
+                '-ecops.msg_len', '-etcp.reassembled.length',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '27\t0x00000109,0x0000010a\t24,24\t',
+            '28\t\t\t',
+            '29\t\t\t',
+            '30\t0x0000010b\t628\t628',
+            '31\t0x0000010b\t24\t',
+            '32\t0x00000109\t24\t24',
+        ]
+
+    def test_cops_pr(self, cmd_tshark, capture_file, test_env):
+        '''COPS-PR: a PRID relative to a PPRID, EPD values of every BER
+        type, GPERR, CPERR and ErrorPRID.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cops_coverage.pcap.gz'),
+                '-Y', 'frame.number == 36',
+                '-Tfields', '-ecops.pprid.prefix_id', '-ecops.prid.instance_id',
+                '-ecops.epd.int', '-ecops.epd.octets', '-ecops.epd.oid',
+                '-ecops.epd.ipv4', '-ecops.epd.unsigned32', '-ecops.epd.timeticks',
+                '-ecops.epd.opaque', '-ecops.epd.integer64', '-ecops.epd.unsigned64',
+                '-ecops.epd.unknown',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.rstrip('\n').split('\t') == [
+            '1.3.6.1.4.1.99999',
+            '1.3.6.1.4.1.99999.1.128.5,1.3.6.1.4.1.99999.3.1',
+            '256,7', '65746830', '1.3.6.1.2.1', '198.51.100.7', '65536', '12345',
+            'deadbeef', '-2', '72623859790382856', '5566',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cops_coverage.pcap.gz'),
+                '-Y', 'frame.number == 37',
+                '-Tfields', '-ecops.gperror', '-ecops.gperror_sub',
+                '-ecops.cperror', '-ecops.cperror_sub', '-ecops.errprid.instance_id',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.rstrip('\n').split('\t') == [
+            '13,1,99', '0x0901,0x0002,0x0000', '13,3,99', '0x0801,0x0004,0x0000',
+            '1.3.6.1.4.1.99999.3.1',
+        ]
+
+    def test_cops_packetcable(self, cmd_tshark, capture_file, test_env):
+        '''PacketCable Multimedia and D-QoS: transaction IDs and gate
+        commands in the Info column, gate IDs, errors, reasons, DOCSIS
+        service class name, subscriber IDs.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cops_coverage.pcap.gz'),
+                '-Y', 'frame.number >= 42',
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+                '-ecops.pc_gate_id', '-ecops.pc_mm_error_ec', '-ecops.pc_mm_error_esc',
+                '-ecops.pc_delete_subcode', '-ecops.pc_close_subcode',
+                '-ecops.pc_mm_docsis_scn', '-ecops.pc_mm_userid',
+                '-ecops.pc_subscriber_id4', '-ecops.pc_subscriber_id6',
+            ), encoding='utf-8', env=test_env)
+        lines = [l.split('\t') for l in stdout.splitlines()]
+        assert [' '.join(l[1].split()) for l in lines] == [
+            'COPS Decision (DEC) - Gate Set',
+            'COPS Report State (RPT) - Gate Set Ack',
+            'COPS Report State (RPT) - Gate Set Err',
+            'COPS Decision (DEC) - Unknown',
+        ] + ['COPS Decision (DEC) - Gate Set'] * 6 + [
+            'COPS Decision (DEC) - Synch Request',
+            'COPS Report State (RPT) - Gate Report State',
+            'COPS Client-Open (OPN)',
+            'COPS Client-Accept (CAT)',
+            'COPS Decision (DEC) - Gate Set',
+            'COPS Report State (RPT) - Gate Set Ack',
+            'COPS Report State (RPT) - Gate Set Err',
+            'COPS Report State (RPT) - Gate Close',
+            'COPS Decision (DEC) - Unknown',
+        ]
+        assert lines[0][2:] == ['0xabcd0001', '', '', '', '', '', 'user@example',
+                                '198.51.100.10', '2001:db8::100']
+        assert lines[2][3:5] == ['6,7,13', '0x0601,0x0701,0x0000']
+        assert lines[3][7] == 'SCN_A'
+        assert lines[14][2:] == ['0x00001234', '', '', '', '', '', '',
+                                 '198.51.100.20', '2001:db8::200']
+        assert lines[17][2:7] == ['0x00001234', '', '', '3', '5']
+
+    def test_cops_traffic_profiles(self, cmd_tshark, capture_file, test_env):
+        '''The I03, I04 and I05 layouts of every PacketCable Multimedia
+        traffic profile, told apart by the object length, with one, two
+        and three envelopes: traffic priorities, attribute aggregation
+        rule masks (I05 only), unsolicited grant sizes, maximum
+        downstream latencies and required attribute masks per frame.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cops_coverage.pcap.gz'),
+                '-Y', 'frame.number >= 46 && frame.number <= 51',
+                '-Tfields', '-ecops.pc_mm_tp', '-ecops.pc_mm_aarmask',
+                '-ecops.pc_mm_ugs', '-ecops.pc_mm_mdl', '-ecops.pc_mm_ramask',
+            ), encoding='utf-8', env=test_env)
+        counts = [[len(f.split(',')) if f else 0 for f in l.split('\t')]
+                  for l in stdout.splitlines()]
+        assert counts == [
+            [16, 4, 0, 0, 10],   # best effort
+            [18, 6, 0, 0, 12],   # non-real-time polling
+            [0, 6, 0, 0, 12],    # real-time polling
+            [0, 4, 14, 0, 8],    # unsolicited grant
+            [0, 4, 16, 0, 10],   # unsolicited grant with activity detection
+            [10, 4, 0, 10, 4],   # downstream
+        ]
+
+    def test_cops_packetcable_pref(self, cmd_tshark, capture_file, test_env):
+        '''With cops.packetcable off, PacketCable objects are not
+        decoded.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-o', 'cops.packetcable:FALSE',
+                '-r', capture_file('cops_coverage.pcap.gz'),
+                '-Y', 'cops.pc_gate_id || cops.pc_mm_transaction_id || cops.pc_dqos_transaction_id',
+                '-Tfields', '-eframe.number',
+            ), encoding='utf-8', env=test_env)
+        assert count_output(stdout) == 0
