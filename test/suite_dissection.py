@@ -27629,3 +27629,59 @@ class TestDissectCms:
                     '-Tfields', '-ecms.digest',
                 ), encoding='utf-8', env=test_env)
             assert stdout.strip() == digest
+
+
+class TestDissectCnip:
+    def test_cnip_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Every packet type decodes without malformed packets or errors,
+        in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cnip_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert protocols.count('CN/IP') == 17
+        assert protocols.count('LON') == 3
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cnip_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity == error',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cnip_header(self, cmd_tshark, capture_file, test_env):
+        '''The header fields, the priority by destination port, and what
+        follows the header: LonTalk for protocol code 0 (also after an
+        extension header), data for other codes and packet types.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cnip_coverage.pcap.gz'),
+                '-Y', 'frame.number in {1..5} || frame.number in {15, 19, 20}',
+                '-Tfields', '-eframe.number', '-e_ws.col.info', '-ecnip.type',
+                '-ecnip.exth', '-ecnip.sec', '-ecnip.protocol', '-ecnip.vendorcode',
+                '-ecnip.sessid', '-ecnip.tstamp', '-elon.domain', '-edata.data',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\tPriority Delta_BL: 5 Type: TPDU\t0x01\t0\t0\t0\t0\t287454020\t1000\t42\t',
+            '2\tPriority Delta_BL: 1 Type: TPDU\t0x01\t0\t0\t0\t0\t287454020\t1010\t123456\t',
+            '3\tPriority Delta_BL: 5 Type: TPDU\t0x01\t2\t1\t0\t4660\t287454020\t1020\t42\t',
+            '4\tPriority: normal Type: Data Packet\t0x01\t0\t0\t5\t0\t287454020\t0\t\tdeadbeef',
+            '5\tPriority: urgent Type: Data Packet\t0x01\t0\t1\t31\t0\t4294967295\t4294967295\t\t',
+            '15\tPriority: normal Type: Acknowledge\t0x07\t0\t0\t0\t0\t287454020\t2015\t\t',
+            '19\tPriority: urgent Type: Unknown\t0x55\t1\t0\t0\t0\t287454020\t0\t\t0102',
+            '20\tPriority: normal Type: Data Packet\t0x01\t3\t0\t1\t0\t287454020\t0\t\t',
+        ]
+
+    def test_cnip_undecoded_types(self, cmd_tshark, capture_file, test_env):
+        '''Packet types other than data get the "not yet decoded" warning
+        and their payload as data.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cnip_coverage.pcap.gz'),
+                '-Y', 'cnip.type.unknown',
+                '-Tfields', '-eframe.number', '-ecnip.type', '-edata.len',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert [l.split('\t')[0] for l in lines] == [str(n) for n in range(6, 20)]
+        assert lines[0] == '6\t0x63\t12'
+        assert lines[11] == '17\t0x60\t'
+        assert lines[13] == '19\t0x55\t2'
