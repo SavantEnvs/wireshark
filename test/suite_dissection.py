@@ -28032,3 +28032,159 @@ class TestDissectCoapEap:
             '23\tCoAP-EAP\tport@example.org',
             '24\tCoAP\t',
         ]
+
+
+class TestDissectCola:
+    def test_cola_protocols(self, cmd_tshark, capture_file, test_env):
+        '''The frame counts per protocol, no malformed packets or errors in
+        one and two passes (checked in the full tree: some field errors
+        only show there), and the one unknown command warning.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cola_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.splitlines()
+        assert len(protocols) == 200
+        assert protocols.count('CoLa B') == 152
+        assert protocols.count('CoLa A') == 33
+        assert protocols.count('TCP') == 15
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cola_coverage.pcap.gz'),
+                    '-V',
+                ), encoding='utf-8', env=test_env)
+            assert 'Malformed' not in stdout
+            assert 'Expert Info (Error' not in stdout
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cola_coverage.pcap.gz'),
+                    '-Y', '_ws.expert.severity == warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.split() == ['156']
+
+    def test_cola_names(self, cmd_tshark, capture_file, test_env):
+        '''Every named binary write, and reads, methods, events and answers
+        whose names end at the end of the command (before the checksum).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cola_coverage.pcap.gz'),
+                '-Y', 'sick_cola.write_name',
+                '-Tfields', '-esick_cola.write_name',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.split() == [
+            'MMAlignmentMode', 'LMPautostartmeas', 'CLApplication',
+            'SetActiveApplications', 'LCMcfg', 'LMDscandatacfg',
+            'LMPoutputRange', 'TSCRole', 'TSCTCInterface', 'TSCTCSrvAddr',
+            'TSCTCtimezone', 'TSCTCupdatetime', 'LFPparticle',
+            'LFPmeanfilter', 'LFPnto1filter', 'FREchoFilter', 'MSsuppmode',
+            'CLFogFilterEn', 'MCSenseLevel', 'CLNFDigFilterEn',
+            'CLHWFilterSectEn', 'LICsrc', 'LICencset', 'LICencres',
+            'LICFixVel', 'DO6Fnc', 'DO3Fnc', 'DO1Fnc', 'DO1Logic', 'DO2Fnc',
+            'DO2Logic', 'SYMode', 'SYPhase', 'DO3And4Fnc', 'DI3DebTim',
+            'UnknownWrite', 'LMPautostartmeas',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cola_coverage.pcap.gz'),
+                '-Y', 'frame.number in {4,14,15,128,129,143,144,145,152}',
+                '-Tfields', '-eframe.number', '-esick_cola.read_name',
+                '-esick_cola.method_name', '-esick_cola.event_name',
+                '-esick_cola.answer_name',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            # the reproducer cola_small_fixes.py frame 1
+            '4\tLMPscancfg\t\t\t',
+            '14\tTSCTCmaxoffset\t\t\t',
+            '15\tTSCTCdelay\t\t\t',
+            '128\t\tRun\t\t',
+            '129\t\t\t\tRun',
+            '143\t\t\tNoParams\t',
+            '144\t\t\t\tNoParams',
+            '145\t\t\t\tNoParams',
+            # three PDUs in one segment
+            '152\tDeviceTime,TSCTCdelay,LICSpTh\t\t\t',
+        ]
+
+    def test_cola_checksum(self, cmd_tshark, capture_file, test_env):
+        '''The checksum of a frame longer than 255 octets is correct (it
+        was shown as incorrect before the fix).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cola_coverage.pcap.gz'),
+                '-Y', 'frame.number == 151',
+                '-Tfields', '-esick_cola.binary.length',
+                '-esick_cola.binary.checksum',
+                '-esick_cola.binary.checksum_status',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.strip() == '304\t0x51\t1'
+
+    def test_cola_date_time(self, cmd_tshark, capture_file, test_env):
+        '''The set date time with 0, 0xFFFFFFFF and 5000000 microseconds
+        (they overflowed before the fix), and the status of the answer as
+        a number (it asserted before the fix, frame 200 is the reproducer
+        cola_settime_assert.py).'''
+        env = dict(test_env)
+        env['TZ'] = 'UTC'
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cola_coverage.pcap.gz'),
+                '-Y', 'sick_cola.set_date_time || sick_cola.set_date_time.status_code',
+                '-Tfields', '-eframe.number', '-esick_cola.set_date_time',
+                '-esick_cola.set_date_time.status_code',
+            ), encoding='utf-8', env=env)
+        assert stdout.splitlines() == [
+            '133\t2024-01-02T03:04:05.000000000+0000\t',
+            '134\t2024-01-02T04:15:39.967295000+0000\t',
+            '135\t2024-01-02T03:04:10.000000000+0000\t',
+            '136\t\t1',
+            '200\t\t7',
+        ]
+
+    def test_cola_binary_scan_data(self, cmd_tshark, capture_file, test_env):
+        '''Binary scan data with every optional block, in an answer, a
+        notification and an answer reassembled from three segments.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cola_coverage.pcap.gz'),
+                '-Y', 'sick_cola.scan_data.version && sick_cola.binary.magic_number',
+                '-Tfields', '-eframe.number',
+                '-esick_cola.scan_data.layer_angle',
+                '-esick_cola.scan_data.encoder_amount',
+                '-esick_cola.scan_data.num_16bit_channels',
+                '-esick_cola.scan_data.output_channel.content',
+                '-esick_cola.scan_data.num_data_points',
+                '-esick_cola.scan_data.output_channel.16bit_data',
+                '-esick_cola.scan_data.output_channel.8bit_data',
+                '-esick_cola.scan_data.device_name',
+                '-esick_cola.scan_data.comment',
+                '-esick_cola.scan_data.event_info.type',
+            ), encoding='utf-8', env=test_env)
+        full = ('\t16\t1\t2\tDIST1,DIST2,RSSI1\t3,1,3\t'
+                '0x0064,0x00c8,0x012c,0x0065\t0x0a,0x14,0x1e\tLMS1x\tcomment\tINCR')
+        assert stdout.splitlines() == [
+            '33' + full,
+            '35\t0\t0\t0\t\t\t\t\t\t\t',
+            '139' + full,
+            '155' + full,
+        ]
+
+    def test_cola_ascii_scan_data(self, cmd_tshark, capture_file, test_env):
+        '''ASCII scan data with channels, and the number of 16-bit and
+        8-bit channels at the position of the parameter (they were added at
+        the wrong offset before the fix; frame 183 is the reproducer
+        cola_small_fixes.py frame 5).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cola_coverage.pcap.gz'),
+                '-Y', 'frame.number in {180,183}',
+                '-Tfields', '-eframe.number',
+                '-esick_cola.scan_data.layer_angle',
+                '-esick_cola.scan_data.output_channel.content',
+                '-esick_cola.scan_data.output_channel.start_angle',
+                '-esick_cola.scan_data.output_channel.16bit_data',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '180\t-10\tDIST1,RSSI1\t-45,-45\t0x0064,0x00c8,0x012c,0x000a,0x0014',
+            '183\t0\t\t\t',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cola_coverage.pcap.gz'),
+                '-Y', 'frame.number == 183',
+                '-Tpdml',
+            ), encoding='utf-8', env=test_env)
+        assert 'name="sick_cola.scan_data.num_16bit_channels" showname="Number of 16-bit channels: 0" size="1" pos="110"' in stdout
+        assert 'name="sick_cola.scan_data.num_8bit_channels" showname="Number of 8-bit channels: 0" size="1" pos="112"' in stdout
