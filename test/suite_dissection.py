@@ -27427,3 +27427,81 @@ class TestDissectOran:
         assert len(flows) == 35
         assert ['C', '0:1:0:0', 'DL', '1', '46', '1', '1', '2', '10', '11', '1', '0'] in flows
         assert ' Unique DL beams      Unique UL beams' in lines
+
+
+class TestDissectCmpp:
+    def test_cmpp_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Every command decodes without malformed packets or errors, in
+        one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cmpp_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert protocols.count('CMPP') == 54
+        assert protocols.count('TCP') == 31
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cmpp_coverage.pcap.gz'),
+                '-Y', 'cmpp.Command_Id',
+                '-Tfields', '-ecmpp.Command_Id',
+            ), encoding='utf-8', env=test_env)
+        assert count_output(stdout.replace(',', '\n'), r'^0x') == 58
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cmpp_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cmpp_small_fixes(self, cmd_tshark, capture_file, test_env):
+        '''A CONNECT timestamp of 0xFFFFFFFF is split into decimal parts
+        (it was shown as "00/00 00:00:4294967295"), the ISMG code of a
+        Msg_Id is the 22 bits after the time (it was shifted by 16, not
+        8), and the Source ID of a SUBMIT is 21 octets (17 were shown).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cmpp_coverage.pcap.gz'),
+                '-Y', 'frame.number >= 83',
+                '-Tfields', '-eframe.number', '-ecmpp.connect.Timestamp',
+                '-ecmpp.Msg_Id.timestamp', '-ecmpp.Msg_Id.ismg_code',
+                '-ecmpp.Msg_Id.sequence_id', '-ecmpp.submit.Src_Id',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '83\t42/94 96:72:95\t\t\t\t',
+            '84\t\t01/02 03:04:05\t123456\t7\t',
+            '85\t\t01/02 03:04:05\t123456\t7\t10690000123456789ABCD',
+        ]
+
+    def test_cmpp_submit_deliver(self, cmd_tshark, capture_file, test_env):
+        '''The destinations of a SUBMIT, the status report in a DELIVER
+        and the Msg_Id inside it.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cmpp_coverage.pcap.gz'),
+                '-Y', 'frame.number in {6, 8}',
+                '-Tfields', '-eframe.number', '-ecmpp.Dest_terminal_Id',
+                '-ecmpp.deliver.Report.Status', '-ecmpp.Msg_Id.ismg_code',
+                '-ecmpp.Msg_Id.timestamp', '-ecmpp.Report.SMSC_sequence',
+                '-E', 'aggregator=|',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '6\t13800000001|13800000002|13800000003\t\t0\t00/00 00:00:00\t',
+            '8\t13800000001\tDELIVRD\t2800862|2800862\t11/01 12:31:02|11/01 12:30:45\t42',
+        ]
+
+    def test_cmpp_reassembly(self, cmd_tshark, capture_file, test_env):
+        '''Several PDUs in one segment, and PDUs over two and three
+        segments, are all dissected.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cmpp_coverage.pcap.gz'),
+                '-Y', 'frame.number in {33, 37, 39, 42, 43, 45}',
+                '-Tfields', '-eframe.number', '-ecmpp.Sequence_Id',
+                '-ecmpp.Msg_Length', '-E', 'aggregator=|',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '33\t22|23|24\t8',
+            '37\t25\t140',
+            '39\t26\t4',
+            '42\t28\t',
+            '43\t29\t',
+            '45\t32\t',
+        ]
