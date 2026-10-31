@@ -30877,3 +30877,85 @@ class TestDissectCups:
             f'{uri}even (stopped)',
             f'{uri}odd (0xa)',
         ]
+
+
+class TestDissectCvspserver:
+    def test_cvspserver_frames(self, cmd_tshark, capture_file, test_env):
+        '''The ten data segments of the two connections are CVSPSERVER,
+        with no malformed packets or warnings in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cvspserver_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 22
+        assert protocols.count('CVSPSERVER') == 10
+        assert protocols.count('TCP') == 12
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cvspserver_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cvspserver_info(self, cmd_tshark, capture_file, test_env):
+        '''The Info column tells requests from responses by the port and
+        counts the lines.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cvspserver_coverage.pcap.gz'),
+                '-Y', 'cvspserver',
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '4\tRequest lines : 5',
+            '5\tResponse lines: 1',
+            '6\tRequest lines : 3',
+            '7\tResponse lines: 2',
+            '8\tRequest lines : 6',
+            '9\tResponse lines: 4',
+            '10\tResponse lines: 3',
+            '11\tRequest lines : 1',
+            '18\tRequest lines : 5',
+            '19\tResponse lines: 2',
+        ]
+
+    def test_cvspserver_lines(self, cmd_tshark, capture_file, test_env):
+        '''Every line is a data item: a quoted line end does not end a
+        line, CRLF and LF both end one, an empty line and a last line
+        without a line end are shown, and an octet that is not UTF-8
+        becomes a replacement character.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cvspserver_coverage.pcap.gz'),
+                '-Y', 'cvspserver',
+                '-Tfields', '-Eoccurrence=a', '-Eaggregator=|',
+                '-eframe.number', '-ecvspserver.data',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            "4\tBEGIN AUTH REQUEST|/var/lib/cvsroot|anonymous|Ad!y%:'d|END AUTH REQUEST",
+            '5\tI LOVE YOU',
+            '6\tRoot /var/lib/cvsroot|Valid-responses ok error Valid-requests '
+            'Checked-in New-entry M E F MT|valid-requests',
+            '7\tValid-requests Root Valid-responses valid-requests Directory Entry '
+            'Modified Unchanged Argument Argumentx ci co update|ok',
+            '8\tArgument -m|Argument "Fix the build\\nand the tests"|Argument --|'
+            'Directory .|/var/lib/cvsroot/module|ci',
+            '9\tM Checking in file.c;||M new revision: 1.2; previous revision: 1.1|'
+            'E cvs commit: warn',
+            '10\tM done äöü|E bad � octet|ok',
+            '11\t',
+            '18\tBEGIN VERIFICATION REQUEST|/var/lib/cvsroot|anonymous|A3 0=I|'
+            'END VERIFICATION REQUEST',
+            '19\tE Fatal error, aborting.|I HATE YOU',
+        ]
+
+    def test_cvspserver_tree(self, cmd_tshark, capture_file, test_env):
+        '''The protocol item says Request or Response.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cvspserver_coverage.pcap.gz'),
+                '-Y', 'frame.number in {4, 5}',
+                '-O', 'cvspserver',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert 'CVS pserver Request' in lines
+        assert 'CVS pserver Response' in lines
