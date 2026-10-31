@@ -28188,3 +28188,144 @@ class TestDissectCola:
             ), encoding='utf-8', env=test_env)
         assert 'name="sick_cola.scan_data.num_16bit_channels" showname="Number of 16-bit channels: 0" size="1" pos="110"' in stdout
         assert 'name="sick_cola.scan_data.num_8bit_channels" showname="Number of 8-bit channels: 0" size="1" pos="112"' in stdout
+
+
+COLLECTD_UAT = 'uat:collectd:"u","pw"'
+
+
+class TestDissectCollectd:
+    def test_collectd_frames(self, cmd_tshark, capture_file, test_env):
+        '''Every frame is collectd and decodes without malformed packets or
+        warnings, in one and two passes, with and without the
+        authentication table.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('collectd_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 18
+        assert protocols.count('collectd') == 18
+        for prefs in ((), ('-o', COLLECTD_UAT)):
+            for passes in ((), ('-2',)):
+                stdout = subprocess.check_output((cmd_tshark, *passes, *prefs,
+                        '-r', capture_file('collectd_coverage.pcap.gz'),
+                        '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                        '-Tfields', '-eframe.number',
+                    ), encoding='utf-8', env=test_env)
+                assert count_output(stdout) == 0
+
+    def test_collectd_info(self, cmd_tshark, capture_file, test_env):
+        '''The Info column counts values, plugins, messages and unknown
+        parts; a packet without a host part shows "(null)".'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('collectd_coverage.pcap.gz'),
+                '-Y', 'frame.number in {2, 4, 6, 11}',
+                '-Tfields', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            'Host=web1.example.org,  4 values for 3 plugins, 0 messages',
+            'Host=(null),  1 value  for 1 plugin,  0 messages',
+            'Host=web2.example.org,  0 values for 0 plugins, 2 messages',
+            'Host=web1.example.org,  1 value  for 1 plugin,  0 messages, 2 unknown',
+        ]
+
+    def test_collectd_values(self, cmd_tshark, capture_file, test_env):
+        '''Every value type, including an unknown one.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('collectd_coverage.pcap.gz'),
+                '-Y', 'frame.number == 3',
+                '-Tfields', '-ecollectd.data.valcnt', '-ecollectd.val.type',
+                '-ecollectd.val.counter', '-ecollectd.val.derive',
+                '-ecollectd.val.absolute', '-ecollectd.val.unknown',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.rstrip('\n').split('\t') == [
+            '5', '0x00,0x01,0x02,0x03,0x09',
+            '18446744073709551615', '-42', '7', '0x0123456789abcdef',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('collectd_coverage.pcap.gz'),
+                '-Y', 'collectd.val.gauge == -2.5',
+                '-Tfields', '-eframe.number',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.split() == ['3']
+
+    def test_collectd_notifications(self, cmd_tshark, capture_file, test_env):
+        '''Notifications: severities and messages; the assembled
+        notification takes the time of the packet and an empty message
+        part decodes (the reproducers of the assembled item fixes).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('collectd_coverage.pcap.gz'),
+                '-Y', 'collectd.data.message',
+                '-Tfields', '-eframe.number', '-ecollectd.data.severity',
+                '-ecollectd.data.message',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '5\t0x0000000000000001,0x0000000000000001\tFilesystem / is almost full,Filesystem / is almost full',
+            '6\t0x0000000000000002,0x0000000000000002,0x0000000000000004,0x0000000000000004\tLoad is high,Load is high,Load is normal,Load is normal',
+            '7\t0x0000000000000008,0x0000000000000008\tUnknown severity,Unknown severity',
+            '8\t0x0000000000000004,0x0000000000000004\thello world,hello world',
+            '9\t0x0000000000000000\t,',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('collectd_coverage.pcap.gz'),
+                '-Y', 'frame.number == 8',
+                '-Tfields', '-ecollectd.data.time',
+            ), encoding='utf-8', env=test_env)
+        # The TIME_HR part and the assembled notification
+        times = stdout.rstrip('\n').split(',')
+        assert len(times) == 2
+        assert times[0] == times[1]
+        assert not times[1].startswith('1970-01-01T00:00:00')
+
+    def test_collectd_authentication(self, cmd_tshark, capture_file, test_env):
+        '''Signed and encrypted packets: verified and decrypted for the
+        user in the authentication table, left alone for another user.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('collectd_coverage.pcap.gz'),
+                '-Y', 'collectd.data.username',
+                '-Tfields', '-ecollectd.data.username',
+                '-ecollectd.data.sighash.status', '-ecollectd.data.host',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines()[:6] == [
+            'u\t2\tsigned.example.org,signed.example.org',
+            'nobody\t2\tother.example.org,other.example.org',
+            'u\t\t',
+            'u\t\t',
+            'u\t\t',
+            'nobody\t\t',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('collectd_coverage.pcap.gz'),
+                '-o', COLLECTD_UAT,
+                '-Y', 'frame.number >= 12 && frame.number <= 17',
+                '-Tfields', '-ecollectd.data.username',
+                '-ecollectd.data.sighash.status', '-ecollectd.data.host',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            'u\t1\tsigned.example.org,signed.example.org',
+            'nobody\t2\tother.example.org,other.example.org',
+            'u\t1\tsecret.example.org,secret.example.org',
+            'u,u\t1,1\tboth.example.org,both.example.org',
+            'u,u\t1,1\ttwice.example.org,twice.example.org',
+            'nobody\t\t',
+        ]
+
+    def test_collectd_encryption_depth(self, cmd_tshark, capture_file, test_env):
+        '''The reproducer of the nesting limit: 32 levels of encrypted parts
+        decode with the default depth limit and stop with a warning when
+        the limit is lower.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('collectd_coverage.pcap.gz'),
+                '-o', COLLECTD_UAT,
+                '-Y', 'frame.number == 18',
+                '-Tfields', '-ecollectd.data.host', '-ecollectd.too_deep',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.rstrip('\n').split('\t') == ['host', '']
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('collectd_coverage.pcap.gz'),
+                    '-o', COLLECTD_UAT, '-o', 'gui.max_tree_depth:40',
+                    '-Y', 'collectd.too_deep',
+                    '-Tfields', '-eframe.number', '-ecollectd.data.host',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.splitlines() == ['18\t']
