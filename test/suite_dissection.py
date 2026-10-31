@@ -31491,3 +31491,95 @@ class TestDissectDaytime:
                 '22\tDAYTIME Request\tFalse\t',
                 '23\tDAYTIME Response\tTrue\tSun Nov  1 12:00:00 2026\\r\\n',
             ]
+
+
+class TestDissectDbLsp:
+    def test_db_lsp_protocols(self, cmd_tshark, capture_file, test_env):
+        '''The frame counts per protocol; no malformed packets and no
+        expert infos of warning or error severity in one and two
+        passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('db_lsp_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 19
+        assert protocols.count('DB-LSP') == 10
+        assert protocols.count('DB-LSP-DISC') == 1
+        assert protocols.count('DB-LSP-DISC/JSON') == 1
+        assert protocols.count('TCP') == 7
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('db_lsp_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= "Warning"',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_db_lsp_records(self, cmd_tshark, capture_file, test_env):
+        '''Configuration, data, unknown type and type 0x80 records,
+        several records in a segment, a record reassembled from two
+        segments, an unknown magic, a length past the end.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('db_lsp_coverage.pcap.gz'),
+                '-Y', 'db-lsp && frame.number != 16',
+                '-Tfields', '-eframe.number', '-edb-lsp.type',
+                '-edb-lsp.magic', '-edb-lsp.length', '-edb-lsp.op',
+                '-edb-lsp.value', '-edb-lsp.data',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert lines[0] == '6\t22\t769\t371\t11\t\t'
+        assert lines[1] == '7\t22\t769\t35\t1\t01030300' + '00' * 31 + '\t'
+        assert lines[2] == '8\t23\t769\t48\t\t\t' + 'aa' * 48
+        assert lines[3:6] == [
+            '9\t21\t769\t2\t\t0228\t',
+            '10\t128\t769\t4\t\t01020304\t',
+            '11\t23,23,22\t769,769,769\t5,6,1\t14\t0e\t0101010101,020202020202',
+        ]
+        assert lines[6] == '13\t23\t769\t1024\t\t\t' + bytes(range(256)).hex() * 4
+        assert lines[7:] == [
+            '14\t22\t771\t2\t\t\t',
+            '15\t128\t769\t200\t\t\t',
+        ]
+
+    def test_db_lsp_certificate(self, cmd_tshark, capture_file, test_env):
+        '''The X.509 certificate 10 octets into a certificate record.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('db_lsp_coverage.pcap.gz'),
+                '-Y', 'frame.number == 6',
+                '-Tfields', '-ex509af.serialNumber', '-ex509sat.uTF8String',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.rstrip('\n').split('\t') == [
+            '01234567', 'Example LAN Sync,dropbox-ca,Example LAN Sync,host-1']
+
+    def test_db_lsp_short_certificate(self, cmd_tshark, capture_file, test_env):
+        '''A certificate record with a length of 3 (less than the 10
+        octets before the certificate) is shown as a value; it was handed
+        to X.509 with a length near 4 GB and marked malformed.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('db_lsp_coverage.pcap.gz'),
+                '-Y', 'frame.number == 16',
+                '-Tfields', '-edb-lsp.type', '-edb-lsp.length', '-edb-lsp.op',
+                '-edb-lsp.value', '-ex509af.signedCertificate_element',
+                '-e_ws.malformed',
+            ), encoding='utf-8', env=test_env)
+        assert stdout == '22,0\t3,0\t11\t0b0000\t\t\n'
+
+    def test_db_lsp_discovery(self, cmd_tshark, capture_file, test_env):
+        '''Discovery broadcasts: JSON through the heuristic, or text.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('db_lsp_coverage.pcap.gz'),
+                '-Y', 'db-lsp-disc',
+                '-Tfields', '-eframe.number', '-edb-lsp.text', '-ejson.member',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\t\thost_int,version,displayname,port,namespaces',
+            '2\tDropbox LAN sync discovery: not JSON\t',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('db_lsp_coverage.pcap.gz'),
+                '-o', 'db-lsp.try_heuristic:FALSE',
+                '-Y', 'frame.number == 1',
+                '-Tfields', '-edb-lsp.text',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.startswith('{"host_int": 211184270, "version": [2, 0]')
