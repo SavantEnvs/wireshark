@@ -27505,3 +27505,127 @@ class TestDissectCmpp:
             '43\t29\t',
             '45\t32\t',
         ]
+
+
+class TestDissectCms:
+    def test_cms_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Every content type decodes without malformed packets or errors,
+        in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cms_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert protocols.count('CMS') == 13
+        assert protocols.count('CMS/IMF') == 6
+        assert protocols.count('HTTP') == 2
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cms_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity == error',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cms_content_types(self, cmd_tshark, capture_file, test_env):
+        '''The content type of each message, also through HTTP with the
+        S/MIME media types, and the recipient info choices.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cms_coverage.pcap.gz'),
+                '-Y', 'frame.number <= 20',
+                '-Tfields', '-eframe.number', '-ecms.contentType',
+                '-ecms.RecipientInfo', '-E', 'aggregator=|',
+            ), encoding='utf-8', env=test_env)
+        signed = '1.2.840.113549.1.7.2'
+        enveloped = '1.2.840.113549.1.7.3'
+        assert stdout.splitlines() == [
+            f'1\t{signed}\t',
+            f'2\t{signed}\t',
+            f'3\t{signed}\t',
+            f'4\t{enveloped}\t0|0|1|1|1|2|2|3|3|4',
+            f'5\t{enveloped}\t0',
+            '6\t1.2.840.113549.1.7.5\t',
+            '7\t1.2.840.113549.1.7.6\t',
+            '8\t1.2.840.113549.1.7.6\t',
+            '9\t1.2.840.113549.1.9.16.1.2\t0',
+            '10\t1.2.840.113549.1.9.16.1.9\t',
+            '11\t1.2.840.113549.1.9.16.1.23\t2',
+            f'12\t1.2.840.113549.1.9.16.1.6|1.2.840.113549.1.9.16.1.6|{signed}\t',
+            f'13\t{signed}|1.2.840.113549.1.7.1\t',
+            f'14\t{signed}\t2',
+            f'15\t{signed}|{signed}\t',
+            f'16\t{signed}|{signed}\t',
+            '17\t1.2.840.113549.1.9.16.1.16\t',
+            f'18\t{enveloped}\t0',
+            f'19\t{signed}\t',
+            f'20\t{signed}|{signed}\t',
+        ]
+
+    def test_cms_message_digests(self, cmd_tshark, capture_file, test_env):
+        '''The messageDigest attributes of the first SignedData are checked
+        against the eContent: SHA-1 correct, MD5 incorrect, SHA-256 not
+        supported.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cms_coverage.pcap.gz'),
+                '-Y', 'frame.number == 1', '-V',
+            ), encoding='utf-8', env=test_env)
+        assert count_output(stdout, r'MessageDigest: acd0b0dba805121de79b4ae2280741a3d233c91d \[correct\]$') == 1
+        assert count_output(stdout, r'MessageDigest: 0{32} \[incorrect, should be F171F8B4A3319CC81BA550CCE2D0BBCE\]$') == 1
+        assert count_output(stdout, r'MessageDigest: 6761903d.* \[unable to verify\]$') == 1
+
+    def test_cms_stale_content(self, cmd_tshark, capture_file, test_env):
+        '''Two SignedData in one record: the second is detached, and its
+        messageDigest is not checked against the content of the first. It
+        used to be shown as correct.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cms_coverage.pcap.gz'),
+                '-Y', 'frame.number == 20', '-V',
+            ), encoding='utf-8', env=test_env)
+        digests = [l.strip() for l in stdout.splitlines() if 'MessageDigest:' in l]
+        assert digests == [
+            'MessageDigest: aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d [correct]',
+            'MessageDigest: aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d',
+        ]
+
+    def test_cms_nested_too_deep(self, cmd_tshark, capture_file, test_env):
+        '''A ContentInfo nested 600 times stops with an expert info before
+        the layer limit. It used to hit the DISSECTOR_ASSERT on the number
+        of layers.'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cms_coverage.pcap.gz'),
+                    '-Y', 'cms.too_deep',
+                    '-Tfields', '-eframe.number', '-ecms.contentType',
+                ), encoding='utf-8', env=test_env)
+            frame, types = stdout.strip().split('\t')
+            assert frame == '21'
+            assert 400 < len(types.split(',')) < 500
+
+    def test_cms_firmware(self, cmd_tshark, capture_file, test_env):
+        '''The firmware package attributes, load receipts and load errors
+        (RFC 4108).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cms_coverage.pcap.gz'),
+                '-Y', 'frame.number in {14..16}',
+                '-Tfields', '-eframe.number', '-ecms.hwSerialEntries',
+                '-ecms.verNum', '-ecms.hwSerialNum', '-ecms.errorCode',
+                '-ecms.vendorErrorCode', '-E', 'aggregator=|',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '14\t3\t3|1\t\t\t',
+            '15\t\t3\t534e2d30303033|534e2d30303034\t\t',
+            '16\t\t3|4\t534e2d30303033|534e2d30303034\t28|99\t4711',
+        ]
+
+    def test_cms_pbe_decrypt(self, cmd_tshark, capture_file, test_env):
+        '''With the pkcs12 password preference, the PBE EncryptedData is
+        decrypted and the DigestedData inside is dissected.'''
+        for prefs, digest in (((), ''),
+                              (('-o', 'pkcs12.password:cms'),
+                               'e5e9fa1ba31ecd1ae84f75caaa474f3a663f05f4')):
+            stdout = subprocess.check_output((cmd_tshark, *prefs,
+                    '-r', capture_file('cms_coverage.pcap.gz'),
+                    '-Y', 'frame.number == 8',
+                    '-Tfields', '-ecms.digest',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.strip() == digest
