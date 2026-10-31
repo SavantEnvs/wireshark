@@ -31583,3 +31583,158 @@ class TestDissectDbLsp:
                 '-Tfields', '-edb-lsp.text',
             ), encoding='utf-8', env=test_env)
         assert stdout.startswith('{"host_int": 211184270, "version": [2, 0]')
+
+
+class TestDissectDbus:
+    # Interface 0 is link-layer type 231 (D-Bus), interface 1 Exported
+    # PDU, interface 2 Ethernet with D-Bus over TCP port 55556.
+    decode_as = ('-d', 'tcp.port==55556,dbus')
+
+    def run_tshark(self, cmd_tshark, capture_file, test_env, *args):
+        return subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dbus_coverage.pcapng.gz'),
+                *self.decode_as, *args,
+            ), encoding='utf-8', env=test_env)
+
+    def test_dbus_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Frame counts per protocol, and no malformed packets or D-Bus
+        expert infos in one and two passes.'''
+        stdout = self.run_tshark(cmd_tshark, capture_file, test_env,
+                '-Tfields', '-e_ws.col.protocol')
+        protocols = stdout.splitlines()
+        assert len(protocols) == 41
+        assert protocols.count('D-Bus') == 33
+        assert protocols.count('TCP') == 8
+        for proto, count in (('dbus', 33), ('exported_pdu', 3), ('tcp', 14)):
+            stdout = self.run_tshark(cmd_tshark, capture_file, test_env,
+                    '-Y', proto, '-Tfields', '-eframe.number')
+            assert count_output(stdout) == count
+        for passes in ((), ('-2',)):
+            stdout = self.run_tshark(cmd_tshark, capture_file, test_env,
+                    *passes, '-Y', '_ws.malformed || (dbus && _ws.expert)',
+                    '-Tfields', '-eframe.number')
+            assert count_output(stdout) == 0
+
+    def test_dbus_info(self, cmd_tshark, capture_file, test_env):
+        '''Method calls, returns, errors and signals in the Info column,
+        with the member of a reply taken from its tracked request.'''
+        stdout = self.run_tshark(cmd_tshark, capture_file, test_env,
+                '-2', '-Y', 'dbus', '-Tfields', '-eframe.number',
+                '-e_ws.col.info')
+        assert stdout.splitlines() == [
+            '1\tHello() @ /org/freedesktop/DBus',
+            "2\t-> 's'",
+            '3\t* NameAcquired(s) @ /org/freedesktop/DBus',
+            '4\tSetAll(ybnqiuxtdsogh) @ /com/example/MusicPlayer1',
+            "5\t-> SetAll: 'bs'",
+            '6\tSet(sa{sv}) @ /',
+            '7\t! Set: org.freedesktop.DBus.Error.InvalidArgs',
+            '8\tStop() @ /com/example/MusicPlayer1',
+            '9\tEject() @ /com/example/MusicPlayer1',
+            '10\t! Eject: org.freedesktop.DBus.Error.ServiceUnknown',
+            '11\tNested_1(aava(i(ss))aa{ss}a{ib}a(yv)) @ /a/b_2/C3',
+            '12\t-> Nested_1: OK',
+            "13\t-> 'ybnqiuxtdsogh'",
+            '14\tPing() @ /',
+            "15\t-> 'as'",
+            '16\t! com.example.Error.Failed',
+            '17\t* Changed(a{s(iv)}) @ /com/example',
+            '18\t_m2(y) @ /org/example_1',
+            '19\tGet(u) @ /exp',
+            "20\t-> Get: '(sv)'",
+            '21\t* Changed(a{yy}) @ /exp',
+            '22\tM(av) @ /',
+            '23\tQ() @ /svc3',
+            "24\t-> Q: 'u'",
+            '25\tR() @ /svc4',
+            '26\t-> R: OK',
+            '27\t* Deep(va{s(i(y))}) @ /n',
+            '31\tHello() @ /org/freedesktop/DBus',
+            "32\t-> 's'",
+            '33\tB(i) @ /t',
+            '36\tPut(ay) @ /t',
+            '37\tC(s) @ /t',
+            "38\t-> B: 'i'",
+        ]
+
+    def test_dbus_tracking(self, cmd_tshark, capture_file, test_env):
+        '''Requests and replies are matched by sender and serial, also
+        when the reply comes from the unique name of the destination or
+        from the bus; a unique name is resolved to its well-known name.'''
+        stdout = self.run_tshark(cmd_tshark, capture_file, test_env,
+                '-2', '-Y', 'dbus.response_in || dbus.response_to',
+                '-Tfields', '-eframe.number', '-edbus.response_in',
+                '-edbus.response_to', '-edbus.sender', '-edbus.destination',
+                '-edbus.member')
+        assert stdout.splitlines() == [
+            '4\t5\t\t:1.42\tcom.example.MusicPlayer1\tSetAll',
+            '5\t\t4\t:1.7,com.example.MusicPlayer1\t:1.42\tSetAll',
+            '6\t7\t\t:1.7,com.example.MusicPlayer1\t:1.42\tSet',
+            '7\t\t6\t:1.42\t:1.7,com.example.MusicPlayer1\tSet',
+            '9\t10\t\t:1.42\tcom.example.Absent\tEject',
+            '10\t\t9\torg.freedesktop.DBus\t:1.42\tEject',
+            '11\t12\t\t:1.42\t:1.7,com.example.MusicPlayer1\tNested_1',
+            '12\t\t11\t:1.7,com.example.MusicPlayer1\t:1.42\tNested_1',
+            '18\t0\t\t:1.42\torg.ex-ample.Svc2\t_m2',
+            '19\t20\t\t:1.99\tcom.example.Exp\tGet',
+            '20\t\t19\tcom.example.Exp\t:1.99\tGet',
+            '23\t24\t\t:1.42\t:1.30,com.example.Svc3\tQ',
+            '24\t\t23\tcom.example.Svc3\t:1.42\tQ',
+            '25\t26\t\t:1.42\t:1.31\tR',
+            '26\t\t25\t:1.32\t:1.42\tR',
+            '33\t38,38\t\t:1.5,:1.5\tcom.example.T,com.example.T\tA,B',
+            '36\t0\t\t:1.5\tcom.example.T\tPut',
+            '37\t0\t\t:1.5\tcom.example.T\tC',
+            '38\t\t33,33\t:1.6,com.example.T,:1.6,com.example.T\t:1.5,:1.5\tA,B',
+        ]
+
+    def test_dbus_basic_types(self, cmd_tshark, capture_file, test_env):
+        '''Every basic type in little-endian (frame 4) and big-endian
+        (frame 13) order.'''
+        stdout = self.run_tshark(cmd_tshark, capture_file, test_env,
+                '-Y', 'frame.number == 4 || frame.number == 13',
+                '-Tfields', '-edbus.type.byte', '-edbus.type.boolean',
+                '-edbus.type.int16', '-edbus.type.uint16',
+                '-edbus.type.int32', '-edbus.type.uint32',
+                '-edbus.type.int64', '-edbus.type.uint64',
+                '-edbus.type.string', '-edbus.type.object_path',
+                '-edbus.type.signature', '-edbus.type.unix_fd')
+        assert stdout.splitlines() == [
+            '165\tTrue\t-2\t65534\t-100000\t4000000000\t-1099511627776\t'
+            '9223372036854775813\théllo\t/com/example/Track_1\ta{sv}(ii)\t0',
+            '0\tFalse\t32767\t0\t2147483647\t0\t9223372036854775807\t0\tz\t/\t\t3',
+        ]
+
+    def test_dbus_tcp_reassembly(self, cmd_tshark, capture_file, test_env):
+        '''Two messages in one segment (frames 33 and 38), and a message
+        of 2624 octets over three segments whose last one also starts the
+        next message (frames 34-37).'''
+        stdout = self.run_tshark(cmd_tshark, capture_file, test_env,
+                '-2', '-Y', 'frame.number >= 33 && frame.number <= 38',
+                '-Tfields', '-eframe.number', '-etcp.reassembled_in',
+                '-etcp.reassembled.length', '-edbus.serial',
+                '-edbus.body_length', '-edbus.type.array.length')
+        assert stdout.splitlines() == [
+            '33\t\t\t2,3\t4,4\t103,103',
+            '34\t36\t\t\t\t',
+            '35\t36\t\t\t\t',
+            '36\t37\t2624\t4\t2504\t104,2500',
+            '37\t\t128\t5\t8\t103',
+            '38\t\t\t2,3\t4,4\t47,47',
+        ]
+
+    def test_dbus_variants(self, cmd_tshark, capture_file, test_env):
+        '''Variants of one complete type each in an "av" body (frame 22,
+        the valid form of the empty-signature reproducer, which asserted
+        before "D-Bus: Require a variant signature to be one complete
+        type"), and nested structs in a variant signature and in a dict
+        entry value (frame 27).'''
+        stdout = self.run_tshark(cmd_tshark, capture_file, test_env,
+                '-Y', 'frame.number == 22 || frame.number == 27',
+                '-Tfields', '-eframe.number', '-edbus.type.variant.signature',
+                '-edbus.type.array.length', '-edbus.type.byte',
+                '-edbus.type.int32', '-edbus.type.uint32')
+        assert stdout.splitlines() == [
+            '22\to,s,g,y,ai\t40,12,0\t0\t\t',
+            '27\to,s,s,g,((iy)u)\t73,17\t2,5\t-1,4\t3',
+        ]
