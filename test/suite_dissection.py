@@ -32148,3 +32148,70 @@ class TestDissectDcerpcAtsvc:
         assert lines[11][9] == '2'
         assert lines[12][8] == '4096'
         assert lines[15][0:5] == ['3600000', '0x00000003', '0x03', '0x05', 'backup.cmd']
+
+
+class TestDissectDcerpcBossvr:
+    BOSSVR_OPS = [
+        'GetServerStatus', 'CreateBnode', 'DeleteBnode', 'SetStatus',
+        'GetStatus', 'EnumerateInstance', 'GetInstanceInfo',
+        'GetInstanceParm', 'AddSUser', 'DeleteSUser', 'ListSUsers',
+        'ListKeys', 'AddKey', 'DeleteKey', 'GenerateKey',
+        'GarbageCollectKeys', 'GetCellName', 'SetTStatus', 'ShutdownAll',
+        'RestartAll', 'StartupAll', 'SetNoAuthFlag', 'ReBossvr', 'Restart',
+        'Install', 'UnInstall', 'GetDates', 'Prune', 'SetRestartTime',
+        'GetRestartTime', 'GetLog', 'WaitAll', 'SetDebug',
+        'GetServerInterfaces',
+    ]
+
+    def test_bossvr_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Frame counts: two connections (NDR little and big endian) with
+        a bind and 35 calls each, and no malformed packets or warnings in
+        one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcerpc_bossvr_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 156
+        assert protocols.count('BOSSVR') == 140
+        assert protocols.count('DCERPC') == 4
+        assert protocols.count('TCP') == 12
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('dcerpc_bossvr_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= "Warning"',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_bossvr_bind(self, cmd_tshark, capture_file, test_env):
+        '''The binds name the BOSSVR interface, version 0.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcerpc_bossvr_coverage.pcap.gz'),
+                '-Y', 'dcerpc.pkt_type == 11',
+                '-Tfields', '-edcerpc.drep.byteorder', '-edcerpc.cn_bind_to_uuid',
+                '-edcerpc.cn_bind_if_ver', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        info = 'Bind: call_id: 1, Fragment: Single, 1 context items: BOSSVR V0.0 (32bit NDR)'
+        assert stdout.splitlines() == [
+            '1\t4d37f2dd-ed43-0000-02c0-37cf1e000001\t0\t' + info,
+            '0\t4d37f2dd-ed43-0000-02c0-37cf1e000001\t0\t' + info,
+        ]
+
+    def test_bossvr_opnums(self, cmd_tshark, capture_file, test_env):
+        '''Every opnum is named in requests and responses; the stubs are
+        not dissected; opnum 34 is unknown.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcerpc_bossvr_coverage.pcap.gz'),
+                '-Y', 'bossvr',
+                '-Tfields', '-ebossvr.opnum', '-e_ws.col.info',
+                '-edcerpc.stub_data',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert len(lines) == 140
+        for conn, le in ((0, True), (1, False)):
+            for opnum in range(35):
+                name = self.BOSSVR_OPS[opnum] if opnum < 34 else 'Unknown operation 34'
+                value = (0x1000 + opnum).to_bytes(4, 'little' if le else 'big').hex()
+                assert lines[conn * 70 + 2 * opnum] == '%d\t%s request\t%s' % (opnum, name, value)
+                assert lines[conn * 70 + 2 * opnum + 1] == '%d\t%s response\t%s00000000' % (opnum, name, value)
