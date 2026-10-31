@@ -28448,3 +28448,83 @@ class TestDissectCommunityIdCoverage:
             '45\t\t',
             '47\t99\t1:qo9ZnHKd7rxCPSh5JqG7GenNLoI=',
         ]
+
+
+class TestDissectComponentStatus:
+    def test_componentstatus_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Every report decodes without malformed packets or warnings, in
+        one and two passes; the packets the heuristic rejects stay UDP.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('componentstatus_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == ['ComponentStatusProtocol'] * 9 + ['UDP'] * 3
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('componentstatus_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_componentstatus_reports(self, cmd_tshark, capture_file, test_env):
+        '''Header, sender group and association records of every report.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('componentstatus_coverage.pcap.gz'),
+                '-Y', 'componentstatusprotocol',
+                '-Tfields', '-ecomponentstatusprotocol.message_final_bit',
+                '-ecomponentstatusprotocol.message_length',
+                '-ecomponentstatusprotocol.message_sender_id.group',
+                '-ecomponentstatusprotocol.componentstatusreport_associations',
+                '-ecomponentstatusprotocol.componentassociation_protocolid',
+                '-ecomponentstatusprotocol.componentassociation_ppid',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            'True\t0\t0x0000\t1\t132\t46',
+            'True\t316\t0x0000\t1\t132\t46',
+            'True\t316\t0x0000\t1\t132\t46',
+            'False\t288\t0x0001\t0\t\t',
+            'True\t336\t0x0002\t2\t132,6\t46,0',
+            'True\t383\t0x0003\t5\t17,255,132\t0,4294967295,51',
+            'True\t384\t0x00ff\t4\t132,132,132,132\t47,48,49,50',
+            'False\t288\t0x0000\t0\t\t',
+            'False\t312\t0x0002\t1\t132\t46',
+        ]
+
+    def test_componentstatus_labels(self, cmd_tshark, capture_file, test_env):
+        '''Workload markers, an unknown duration and the group names.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('componentstatus_coverage.pcap.gz'),
+                '-Y', 'frame.number >= 4 && frame.number <= 7',
+                '-O', 'componentstatusprotocol', '-V',
+            ), encoding='utf-8', env=test_env)
+        for label in ('Workload: N/A',
+                      'Duration: Unknown',
+                      'Group: Registrar (0x0001)',
+                      'Group: Pool Element (0x0002)',
+                      'Group: Pool User (0x0003)',
+                      'Location: Lab Ä',
+                      'Association #4'):
+            assert label in stdout
+        # 0x0000, 0x7fff and 0xfffe of 0xfffe, with the locale's separator
+        for workload in ('0', '50', '100'):
+            assert ('Workload: %s.00%%' % workload in stdout
+                    or 'Workload: %s,00%%' % workload in stdout)
+
+    def test_componentstatus_stat(self, cmd_tshark, capture_file, test_env):
+        '''The share columns of the statistics are decimals, and a bytes
+        share of messages whose lengths are all 0 is 0 (the reproducers of
+        "ComponentStatus: Show the share columns of the statistics as
+        decimals").'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('componentstatus_coverage.pcap.gz'),
+                '-q', '-z', 'componentstatusprotocol,stat',
+            ), encoding='utf-8', env=test_env)
+        assert ('ComponentStatus Report    |9 |100.000 % |2623 |100.000 % |' in stdout
+                or 'ComponentStatus Report    |9 |100,000 % |2623 |100,000 % |' in stdout)
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('componentstatus_coverage.pcap.gz'),
+                '-q', '-z', 'componentstatusprotocol,stat,frame.number==1',
+            ), encoding='utf-8', env=test_env)
+        assert ('ComponentStatus Report    |1 |100.000 % |0 |0.000 % |' in stdout
+                or 'ComponentStatus Report    |1 |100,000 % |0 |0,000 % |' in stdout)
