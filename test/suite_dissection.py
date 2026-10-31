@@ -30302,3 +30302,102 @@ class TestDissectCredssp:
         assert [' '.join(l.split()) for l in stdout.splitlines()] == [
             '32 CredSSP', '33 CredSSP', '34 CredSSP',
             '35', '36', '37', '38', '39', '40']
+
+
+class TestDissectCrmf:
+    def test_crmf_protocols(self, cmd_tshark, capture_file, test_env):
+        '''CRMF inside CMP over HTTP and TCP decodes without malformed
+        packets or warnings, in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('crmf_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 22
+        assert protocols.count('CMP') == 16
+        assert protocols.count('TCP') == 6
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('crmf_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_crmf_cert_req_messages(self, cmd_tshark, capture_file, test_env):
+        '''CertReqMessages in ir, cr, kur, krr and ccr with every
+        ProofOfPossession and POPOPrivKey choice and SubsequentMessage
+        value.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('crmf_coverage.pcap.gz'),
+                '-Y', 'crmf.certReqId',
+                '-Tfields', '-eframe.number', '-ecmp.body',
+                '-ecrmf.certReqId', '-ecrmf.popo', '-ecrmf.keyEncipherment',
+                '-ecrmf.keyAgreement', '-ecrmf.subsequentMessage',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '4\t0\t0,7,1\t1,0\t\t\t',
+            '6\t2\t0,1,2,3,4\t2,2,2,2\t0,1,1,1\t\t0,1,5',
+            '8\t7\t0,1,2,3,4\t3,3,3,1,1\t\t2,3,4\t',
+            '10\t9\t0\t2\t4\t\t',
+            '12\t13\t0\t1\t\t\t',
+            '17\t22\t9\t\t\t\t',
+            '21\t0\t0,7,1\t1,0\t\t\t',
+        ]
+
+    def test_crmf_registered_oids(self, cmd_tshark, capture_file, test_env):
+        '''The registration control and registration info OIDs reach the
+        CRMF BER OID dissectors through AttributeTypeAndValue (ir) and
+        InfoTypeAndValue (genp), as does PasswordBasedMac.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('crmf_coverage.pcap.gz'),
+                '-Y', 'frame.number == 4 || frame.number == 17',
+                '-Tfields', '-ecrmf.type.oid', '-ecmp.type.oid',
+                '-ecrmf.serialNumber', '-ecrmf.iterationCount',
+                '-ecrmf.RegToken', '-ecrmf.Authenticator', '-ecrmf.UTF8Pairs',
+            ), encoding='utf-8', env=test_env)
+        ctrl = ['1.3.6.1.5.5.7.5.1.%d' % i for i in range(1, 7)] + \
+            ['1.3.6.1.5.5.7.5.2.1', '1.3.6.1.5.5.7.5.2.2']
+        ir, genp = [l.split('\t') for l in stdout.splitlines()]
+        assert ir == [','.join(ctrl + ['1.3.6.1.5.5.7.5.1.1']), '',
+                      '81985529216486895,4097', '10000',
+                      'one-time token 4711,one-time token 4711',
+                      "mother's maiden name",
+                      'version?1%corp_company?Example%org_unit?Test%']
+        assert genp == ['', ','.join(ctrl + ['1.2.840.113533.7.66.13']),
+                        '9223372036854775807,1', '1',
+                        'token via genp', 'authenticator via genp', 'a?b%']
+
+    def test_crmf_archive_and_publication(self, cmd_tshark, capture_file, test_env):
+        '''Every PKIArchiveOptions and EncryptedKey choice and the
+        PKIPublicationInfo actions and publication methods.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('crmf_coverage.pcap.gz'),
+                '-Y', 'crmf.PKIArchiveOptions || crmf.action',
+                '-Tfields', '-eframe.number', '-ecrmf.PKIArchiveOptions',
+                '-ecrmf.archiveRemGenPrivKey', '-ecrmf.encryptedPrivKey',
+                '-ecrmf.action', '-ecrmf.pubMethod',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '4\t0\t\t0\t1\t0,1,2,3',
+            '5\t\t\t\t1\t0,1,2,3',
+            '6\t1,2,2\tTrue,False\t\t\t',
+            '8\t0\t\t1\t0\t',
+            '17\t2\tTrue\t\t1\t0,1,2,3',
+            '21\t0\t\t0\t1\t0,1,2,3',
+            '22\t\t\t\t1\t0,1,2,3',
+        ]
+
+    def test_crmf_enc_key_with_id(self, cmd_tshark, capture_file, test_env):
+        '''id-ct-encKeyWithID with a string, two GeneralName identifiers
+        and none.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('crmf_coverage.pcap.gz'),
+                '-Y', 'crmf.EncKeyWithID_element',
+                '-Tfields', '-eframe.number', '-ecrmf.privkey_version',
+                '-ecrmf.identifier', '-ecrmf.string',
+                '-ex509ce.rfc822Name',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '16\t0,0,0,0\t0,1,1\tcrmf-client key 1\tclient@crmf.example',
+        ]
