@@ -29355,3 +29355,104 @@ class TestDissectCoseventcomm:
         assert kinds['26'] == '7'     # tk_double
         assert kinds['27'] == '8'     # tk_boolean
         assert kinds['43'] == '17'    # tk_enum, little endian
+
+
+class TestDissectCosine:
+    def test_cosine_records(self, cmd_tshark, capture_file, test_env):
+        '''Every encapsulation the CoSine text reader produces (Ethernet,
+        PPP, ATM, PPPoATM, Frame Relay, PPPoFR, Cisco HDLC in both
+        directions, TEST and an unknown interface), with and without a
+        date, decodes without malformed packets or warnings, in one and
+        two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosine_coverage.txt.gz'),
+                '-Tfields', '-eframe.number', '-eframe.protocols',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\tcosine:eth:ethertype:ip:icmp:data',
+            '2\tcosine:eth:ethertype:ip:icmp:data',
+            '3\tcosine:ppp:lcp',
+            '4\tcosine:ppp:lcp',
+            '5\tcosine:ppp:ip:udp:discard',
+            '6\tcosine:llc:ip:udp:discard',
+            '7\tcosine:llc:osi:ppp:lcp',
+            '8\tcosine:fr:ip:udp:discard',
+            '9\tcosine:fr:ppp:lcp',
+            '10\tcosine:chdlc:ip:udp:discard',
+            '11\tcosine:chdlc:slarp',
+            '12\tcosine:data',
+            '13\tcosine:data',
+            '14\tcosine:eth:ethertype:arp',
+            '15\tcosine:data',
+            '16\tcosine:data',
+            '17\t',
+        ]
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cosine_coverage.txt.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= "Warning"',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cosine_pseudo_header(self, cmd_tshark, capture_file, test_env):
+        '''The pseudo-header fields from the record header, the channel
+        handle (4 octets for PPP, Frame Relay and received HDLC, 2 for
+        transmitted HDLC) and the ATM SAR header, in one and two passes.'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cosine_coverage.txt.gz'),
+                    '-Tfields', '-eframe.number', '-ecosine.pro',
+                    '-ecosine.off', '-ecosine.pri', '-ecosine.rm',
+                    '-ecosine.err', '-ecosine.channel_id', '-ecosine.sar',
+                ), encoding='utf-8', env=test_env)
+            lines = stdout.splitlines()
+            sar = '000000640000000000000000000000aa'
+            assert lines[0:11] == [
+                '1\t1\t14\t3\t0\t0\t\t',
+                '2\t1\t14\t3\t0\t0\t\t',
+                '3\t0\t0\t0\t0\t0\t00d0d8d2\t',
+                '4\t0\t0\t0\t0\t0\t00d0d8d2\t',
+                '5\t1\t8\t7\t0\t0\t00d0d8d2\t',
+                '6\t0\t0\t0\t1\t0\t\t' + sar,
+                '7\t0\t0\t0\t0\t0\t\t' + sar,
+                '8\t0\t0\t0\t0\t2\t00000064\t',
+                '9\t0\t0\t0\t0\t0\t00000065\t',
+                '10\t0\t0\t0\t0\t0\t0005\t',
+                '11\t0\t0\t0\t0\t0\t00000005\t',
+            ]
+
+    def test_cosine_interface_names(self, cmd_tshark, capture_file, test_env):
+        '''The interface name from the record header is shown in the
+        CoSine tree item.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosine_coverage.txt.gz'),
+                '-V', '-O', 'cosine',
+            ), encoding='utf-8', env=test_env)
+        names = [l[len('CoSine IPNOS L2 debug output ('):-1]
+                 for l in stdout.splitlines()
+                 if l.startswith('CoSine IPNOS L2 debug output (')]
+        assert names == [
+            'ETH:3/1/1:10', 'ETH:3/1/1:10', 'PPP:3/7/1:100',
+            'PPP:3/7/1:100', 'PPP:3/7/1:100', 'ATM:3/2/1:32',
+            'PPoATM:3/2/1:33', 'FR:3/7/1:1', 'PPoFR:3/7/1:2',
+            'HDLC:3/4/1:5', 'HDLC:3/4/1:5', 'TEST:1/1/1:1',
+            'SONET:3/5/1:7', 'ETH:3/1/1:10', 'TEST:1/1/1:1',
+            'TEST:1/1/1:1', 'TEST:1/1/1:1',
+        ]
+
+    def test_cosine_lengths(self, cmd_tshark, capture_file, test_env):
+        '''The packet length comes from the record header and the
+        captured length from the hex dump: a dump that ends early at an
+        empty line (frame 15), a short last line (frame 14), a record of
+        length 0 (frame 17), a 538 octet record (frame 5).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosine_coverage.txt.gz'),
+                '-Tfields', '-eframe.number', '-eframe.len', '-eframe.cap_len',
+            ), encoding='utf-8', env=test_env)
+        lengths = {l.split('\t')[0]: l.split('\t')[1:] for l in stdout.splitlines()}
+        assert lengths['5'] == ['538', '538']
+        assert lengths['14'] == ['42', '42']
+        assert lengths['15'] == ['40', '16']
+        assert lengths['16'] == ['4', '4']
+        assert lengths['17'] == ['0', '0']
