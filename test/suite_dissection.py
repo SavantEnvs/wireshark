@@ -31738,3 +31738,120 @@ class TestDissectDbus:
             '22\to,s,g,y,ai\t40,12,0\t0\t\t',
             '27\to,s,s,g,((iy)u)\t73,17\t2,5\t-1,4\t3',
         ]
+
+
+class TestDissectDcc:
+    def test_dcc_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Every frame is DCC (42 PDUs in 40 frames) and none is malformed
+        or has an expert info, in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcc_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol', '-edcc.op',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert len(lines) == 40
+        assert all(l.split('\t')[0] == 'DCC' for l in lines)
+        assert sum(len(l.split('\t')[1].split(',')) for l in lines) == 42
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('dcc_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_dcc_info(self, cmd_tshark, capture_file, test_env):
+        '''Requests and responses (by the source port), the operation,
+        the admin operation and the flood operation.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcc_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert lines[0:12] == [
+            'Request: No-Op',
+            'Response: Ok',
+            'Request: Report and Query',
+            'Response: Server Response',
+            'Request: Report and Query',
+            'Response: Server Response',
+            'Request: Report and Query',
+            'Response: Server Response',
+            'Request: Admin, Enable tracing',
+            'Request: Admin, Disable tracing',
+            'Request: Admin, Flood control, Check',
+            'Request: Admin, Flood control, Shutdown',
+        ]
+        assert lines[18:36] == [
+            'Request: Admin, Flood control, Unknown (42)',
+            'Request: Admin, Stop Gracefully',
+            'Request: Admin, Load keys and client IDs',
+            'Request: Admin, Start Switch to new database',
+            'Request: Admin, Finish Switch to new database',
+            'Request: Admin, Return counters',
+            'Request: Admin, Return and zero counters',
+            'Request: Admin, List clients',
+            'Request: Admin, Unknown (255)',
+            'Request: Admin, Unknown (77)',
+            'Response: Admin',
+            'Response: Admin',
+            'Response: Admin',
+            'Request: Invalid Op',
+            'Request: Query',
+            'Response: Server Failing',
+            'Request: Delete Checksum(s)',
+            'Request: Unknown Op: 200',
+        ]
+
+    def test_dcc_opnums_endianness(self, cmd_tshark, capture_file, test_env):
+        '''The operation numbers are read little endian only if the
+        first two octets of the process ID, report and retransmission
+        numbers are all non-zero.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcc_coverage.pcap.gz'),
+                '-Y', 'frame.number in {1,3,39,40}',
+                '-Tfields', '-edcc.opnums.host', '-edcc.opnums.pid',
+                '-edcc.opnums.report', '-edcc.opnums.retrans',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '3221225985\t1234\t7\t1',
+            '3221225985\t1234\t7\t1',
+            '16777216\t83886080\t256\t50331648',
+            '16777216\t83886080\t100663296\t256',
+        ]
+
+    def test_dcc_bodies(self, cmd_tshark, capture_file, test_env):
+        '''Checksums and targets of reports and query responses, OK,
+        admin requests (trace bits, flood operation, value) and admin
+        responses (one client record, text lines).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dcc_coverage.pcap.gz'),
+                '-Tfields', '-eframe.number', '-edcc.checksum.type',
+                '-edcc.target', '-edcc.brand', '-edcc.qdelay_ms',
+                '-edcc.trace', '-edcc.floodop', '-edcc.adminval',
+                '-edcc.id', '-edcc.requests', '-edcc.response_text',
+                '-edcc.signature',
+            ), encoding='utf-8', env=test_env)
+        sig = 'a0a1a2a3a4a5a6a7a8a9aaabacadaeaf'
+        lines = [l.split('\t') for l in stdout.splitlines()]
+        assert lines[1] == ['2', '', '', 'Rhyolite DCC 1.3.163', '250',
+                            '', '', '', '', '', '', sig]
+        assert lines[2][1:3] == ['1,7,8', '0x00000001']
+        assert lines[3][2] == '0x00000003,0x00fffff0,0x00fffff1'
+        assert lines[4][1] == ','.join(str(t) for t in range(14)) + ',99'
+        # 16 checksums: only 15 are shown
+        assert len(lines[6][1].split(',')) == 15
+        assert lines[7][2] == ','.join('0x%08x' % t for t in range(15))
+        assert lines[8][5] == '0x0000007f'
+        assert lines[9][5] == '0x00000015'
+        assert [l[6] for l in lines[10:19]] == ['0', '1', '2', '3', '4',
+                                                '5', '6', '7', '42']
+        assert lines[19][7] == '4096'
+        assert lines[28][8:11] == ['32769', '42', '']
+        assert lines[29][10] == 'version 1.3.163\\n,clients 3\\r\\n,2 queries'
+        assert lines[30][10:12] == ['', sig]
+        # Invalid, query, error, delete and unknown: no body
+        assert all(l[1:12] == [''] * 11 for l in lines[31:36])
+        # Two PDUs in one datagram
+        assert lines[36][11] == sig + ',' + sig
+        assert lines[37][2:5] == ['0x00000009', 'Rhyolite DCC 1.3.163', '250']
