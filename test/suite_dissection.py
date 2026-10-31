@@ -31855,3 +31855,193 @@ class TestDissectDcc:
         # Two PDUs in one datagram
         assert lines[36][11] == sig + ',' + sig
         assert lines[37][2:5] == ['0x00000009', 'Rhyolite DCC 1.3.163', '250']
+
+
+class TestDissectDccp:
+    def test_dccp_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Frame counts per protocol, and no malformed packets or errors
+        in one and two passes; the expert warnings are only in the frames
+        with reserved packet types and wrong option lengths.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dccp_coverage.pcapng.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.splitlines()
+        assert len(protocols) == 78
+        assert protocols.count('DCCP') == 72
+        assert protocols.count('ICMP') == 2
+        assert protocols.count('LTP') == 2
+        assert protocols.count('DCCP, NetPerfMeter') == 1
+        assert protocols.count('IPv4') == 1
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('dccp_coverage.pcapng.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= "Error"',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('dccp_coverage.pcapng.gz'),
+                    '-Y', 'dccp.option.len.bad || dccp.packet_type.reserved',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.split() == ['39', '40', '41', '42', '43', '47',
+                                      '50', '52', '69', '72']
+
+    def test_dccp_checksum(self, cmd_tshark, capture_file, test_env):
+        '''The checksum is good over IPv4, IPv6 and ILNP and with partial
+        coverage; it is not checked for a truncated frame, a first
+        fragment or an Exported PDU without addresses.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dccp_coverage.pcapng.gz'),
+                '-Y', 'dccp && !dccp.checksum.status == 1',
+                '-Tfields', '-eframe.number', '-edccp.checksum.status',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == ['64\t2', '73\t2']
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dccp_coverage.pcapng.gz'),
+                '-o', 'ip.defragment:FALSE',
+                '-Y', 'frame.number in {55,56,57,58,59,65}',
+                '-Tfields', '-eframe.number', '-edccp.cscov',
+                '-edccp.checksum.status',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == ['55\t1\t1', '56\t15\t1', '57\t2\t1',
+                                       '58\t0\t1', '59\t0\t1', '65\t0\t2']
+
+    def test_dccp_relative_seq(self, cmd_tshark, capture_file, test_env):
+        '''Long and short sequence and acknowledgement numbers relative to
+        the Request and Response of each direction, absolute without a
+        handshake.'''
+        stdout = subprocess.check_output((cmd_tshark, '-2',
+                '-r', capture_file('dccp_coverage.pcapng.gz'),
+                '-Y', 'frame.number <= 24',
+                '-Tfields', '-edccp.seq', '-edccp.seq_raw', '-edccp.ack',
+                '-edccp.ack_raw',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert lines[0:4] == [
+            '0\t17592186044416\t\t',
+            '0\t35184372088832\t0\t17592186044416',
+            '1\t17592186044417\t0\t35184372088832',
+            '2\t17592186044418\t0\t35184372088832',
+        ]
+        assert lines[10] == '5\t35184372088837\t4\t17592186044420'
+        # short sequence numbers: absolute (24 bit) and relative, modulo 2^24
+        assert lines[13:17] == [
+            '16777201,1\t\t0\t1193046',
+            '5,21\t\t\t',
+            '1193047,1\t\t21\t5',
+            '1193048,2\t\t\t',
+        ]
+        # no handshake: absolute numbers; a Response sets its own base
+        assert lines[19:24] == [
+            '1000\t\t\t',
+            '1001\t\t\t500',
+            '\t1002\t\t501',
+            '\t1003\t\t501',
+            '0\t502\t\t1003',
+        ]
+
+    def test_dccp_relseq_two_pass(self, cmd_tshark, capture_file, test_env):
+        '''A Data packet before the Request of its flow shows the absolute
+        sequence number and the Request the relative one, in one and two
+        passes (the second pass showed the Data packet as relative before
+        the fix).'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('dccp_coverage.pcapng.gz'),
+                    '-Y', 'frame.number in {67,68}',
+                    '-Tfields', '-edccp.seq', '-edccp.seq_raw', '-e_ws.col.info',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.splitlines() == [
+                '\t1005\t5000 → 5001 [Data] Seq=1005',
+                '0\t1000\t5000 → 5001 [Request] Seq=0 (service=not specified)',
+            ]
+
+    def test_dccp_option_fixes(self, cmd_tshark, capture_file, test_env):
+        '''Change L without a feature number and MP options without an MP
+        option type are reported and skipped; the option after an
+        MP_FAST_CLOSE starts after it; the Reset acknowledgement number
+        is 48 bits.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dccp_coverage.pcapng.gz'),
+                '-Y', 'frame.number in {69,70,71}',
+                '-Tfields', '-edccp.option_type', '-edccp.ack_raw',
+                '-e_ws.expert.message',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '32,1,1\t\tMissing feature number',
+            '46,0,0,0,0\t\t',
+            '\t1108152157446\t',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dccp_coverage.pcapng.gz'),
+                '-Y', 'frame.number == 72',
+                '-Tfields', '-edccp.option_type', '-e_ws.expert.message',
+            ), encoding='utf-8', env=test_env)
+        types, messages = stdout.rstrip('\n').split('\t')
+        assert types.split(',') == ['46', '0'] * 334 + ['46']
+        assert messages.split(',') == ['Missing MP-DCCP option type'] * 335
+
+    def test_dccp_exported_pdu(self, cmd_tshark, capture_file, test_env):
+        '''DCCP in an Exported PDU without IP addresses is dissected
+        without checking the checksum (it asserted before the fix).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dccp_coverage.pcapng.gz'),
+                '-Y', 'frame.number == 73',
+                '-Tfields', '-edccp.type', '-edccp.checksum.status',
+                '-edata.data',
+            ), encoding='utf-8', env=test_env)
+        assert stdout == '2\t2\t68656c6c6f\n'
+
+    def test_dccp_options(self, cmd_tshark, capture_file, test_env):
+        '''Feature negotiation, timestamps, CCID 3 and MP-DCCP options.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dccp_coverage.pcapng.gz'),
+                '-Y', 'frame.number in {2,3,5,6,48,49,51}',
+                '-Tfields', '-edccp.feature_number', '-edccp.timestamp_echo',
+                '-edccp.elapsed_time', '-edccp.ccid3_loss_event_rate',
+                '-edccp.ccid3_receive_rate', '-edccp.mp_path_token',
+                '-edccp.mp_seq', '-edccp.mp_rtt_value', '-edccp.mp_ipv6addr',
+                '-edccp.mp_addrport', '-edccp.mp_close_key', '-edccp.mp_prioval',
+            ), encoding='utf-8', env=test_env)
+        assert [l.split('\t') for l in stdout.splitlines()] == [
+            ['1,3,2', '286331153', '10', '', '', '', '', '', '', '', '', ''],
+            ['', '286331153', '100000,5,70000', '', '', '', '', '', '', '', '', ''],
+            ['', '7', '', '1000', '125000', '', '', '', '', '', '', ''],
+            ['', '', '', '4294967295', '', '', '', '', '', '', '', ''],
+            ['', '', '', '', '', '0x01020304', '12345', '1500', '', '', '', '5'],
+            ['', '', '', '', '', '', '', '', '2001:db8::10,2001:db8::20',
+             '5000,5001', '0x0102030405060708', ''],
+            ['', '', '', '', '', '', '7', '', '', '', '', '1'],
+        ]
+
+    def test_dccp_payload(self, cmd_tshark, capture_file, test_env):
+        '''LTP by port (lower and higher port), NetPerfMeter by heuristic,
+        a fragmented packet reassembled.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dccp_coverage.pcapng.gz'),
+                '-Y', 'frame.number in {60,61,62,63,66}',
+                '-Tfields', '-edccp.srcport', '-edccp.dstport',
+                '-e_ws.col.protocol', '-edata.len',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1113\t40007\tLTP\t',
+            '0\t1113\tLTP\t',
+            '40008\t9000\tDCCP, NetPerfMeter\t',
+            '40008\t9000\tDCCP\t31',
+            '40010\t5010\tDCCP\t64',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dccp_coverage.pcapng.gz'),
+                '-Y', 'frame.number >= 74',
+                '-Tfields', '-edccp.srcport', '-edccp.stream',
+                '-e_ws.col.protocol', '-edata.data',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '0\t15\tDCCP\t706f7274207a65726f',
+            '40011\t16\tDCCP\t746f206d7973656c66',
+            '5011\t16\tDCCP\t616e64206261636b',
+            '40012\t17\tICMP\t',
+            '40012\t17\tICMP\t71756f746564',
+        ]
