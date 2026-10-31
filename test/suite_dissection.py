@@ -28782,3 +28782,127 @@ class TestDissectCorosyncTotemnet:
                 '9\t\t\t5\t2\t',
                 '10\ta0a1a2a3a4a5a6a7a8a9aaabacadaeaf\t\t0\t1\t',
             ]
+
+
+class TestDissectCorosyncTotemsrp:
+    def test_corosync_totemsrp_protocols(self, cmd_tshark, capture_file, test_env):
+        '''19 frames are Totem SRP, 3 are not (UDP only), and none is
+        malformed or has an expert info, in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('corosync_totemsrp_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 22
+        assert protocols.count('COROSYNC/TOTEMSRP') == 19
+        assert protocols.count('UDP') == 3
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('corosync_totemsrp_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_corosync_totemsrp_info(self, cmd_tshark, capture_file, test_env):
+        '''Every message type in little and big endian, encapsulated
+        mcast messages, and packets that are not Totem SRP.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('corosync_totemsrp_coverage.pcap.gz'),
+                '-Tfields', '-eframe.number',
+                '-ecorosync_totemsrp.message_header.type',
+                '-ecorosync_totemsrp.message_header.encapsulated',
+                '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\t0\t0\torf',
+            '2\t0\t0\torf',
+            '3\t1\t2\tmcast',
+            '4\t1,1\t1,2\tENCAPSULATED',
+            '5\t2\t0\tmerge rings',
+            '6\t3\t0\tjoin message',
+            '7\t4\t0\tcommit token',
+            '8\t5\t0\tcancel',
+            '9\t0\t0\torf',
+            '10\t1\t2\tmcast',
+            '11\t1,1,1\t1,1,2\tENCAPSULATED',
+            '12\t2\t0\tmerge rings',
+            '13\t3\t0\tjoin message',
+            '14\t3\t0\tjoin message',
+            '15\t4\t0\tcommit token',
+            '16\t4\t0\tcommit token',
+            '17\t5\t0\tcancel',
+            '18\t\t\t5405 → 5405 Len=5',
+            '19\t\t\t5405 → 5405 Len=38',
+            '20\t\t\t5405 → 5405 Len=64',
+            '21\t0\t0\torf',
+            '22\t1\t2\tmcast',
+        ]
+
+    def test_corosync_totemsrp_mcast_subtree(self, cmd_tshark, capture_file, test_env):
+        '''The node ID and guarantee of an mcast message are in the mcast
+        subtree (they were added to the parent tree before the fix).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('corosync_totemsrp_coverage.pcap.gz'),
+                '-Y', 'frame.number == 3',
+                '-V', '-O', 'corosync_totemsrp',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        start = lines.index('    ring ordered multicast message (ring: 4100 node: 1)')
+        assert lines[start + 1] == '        System from address (node: 1)'
+        assert lines[start + 20:start + 23] == [
+            '            Sequence in member ring id: 4100',
+            '        Node id(unused?): 168496141',
+            '        Guarantee: 2',
+        ]
+
+    def test_corosync_totemsrp_orf_token_seq(self, cmd_tshark, capture_file, test_env):
+        '''The sequence number and the largest sequence number of an ORF
+        token have their own filter names (they shared one before the
+        fix).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('corosync_totemsrp_coverage.pcap.gz'),
+                '-Y', 'corosync_totemsrp.orf_token',
+                '-Tfields', '-eframe.number',
+                '-ecorosync_totemsrp.orf_token.seq',
+                '-ecorosync_totemsrp.orf_token.token_seq',
+                '-ecorosync_totemsrp.orf_token.rtr_list_entries',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\t7\t20\t0',
+            '2\t8\t21\t2',
+            '9\t30\t40\t1',
+            '21\t9\t22\t0',
+        ]
+
+    def test_corosync_totemsrp_lists(self, cmd_tshark, capture_file, test_env):
+        '''Node IDs of nested mcast messages, processor and failed lists
+        of joins, commit token entries and IPv6 addresses with every
+        AF_INET6 value.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('corosync_totemsrp_coverage.pcap.gz'),
+                '-Y', 'frame.number in {4, 6, 7, 11, 13, 14, 15, 16}',
+                '-Tfields', '-eframe.number',
+                '-ecorosync_totemsrp.mcast.node_id',
+                '-ecorosync_totemsrp.memb_join.proc_list_entries',
+                '-ecorosync_totemsrp.memb_join.failed_list_entries',
+                '-ecorosync_totemsrp.memb_commit_token.addr_entries',
+                '-ecorosync_totemsrp.ip_address.family',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '4\t2,3\t\t\t\t2,2,2,2,2,2',
+            '6\t\t2\t1\t\t2,2,2,2,2,2,2,2',
+            '7\t\t\t\t3\t2,2,2,2,2,2,2,2,2,2',
+            '11\t1,2,3\t\t\t\t10,10,10,23,30,10,30,23,10',
+            '13\t\t0\t0\t\t10,10',
+            '14\t\t1\t2\t\t10,10,10,10,10,2,28,24',
+            '15\t\t\t\t0\t10',
+            '16\t\t\t\t1\t10,10,10,10',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('corosync_totemsrp_coverage.pcap.gz'),
+                '-Y', 'frame.number == 14',
+                '-Tfields', '-ecorosync_totemsrp.ip_address.addr6',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.strip() == ('2001:db8::1,2001:db8::1,2001:db8::1,'
+                                  '2001:db8::1,2001:db8::2,2001:db8::3,2001:db8::3')
