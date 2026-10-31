@@ -29563,3 +29563,108 @@ class TestDissectCosnaming:
             for info, op in zip(infos, ('list', 'next_one', 'destroy')):
                 assert info.endswith('No Exception op = %s' % op)
                 assert info.count(' op = ') == 1
+
+
+class TestDissectCouchbase:
+    def test_couchbase_protocols(self, cmd_tshark, capture_file, test_env):
+        '''The frame counts per protocol, no malformed packets or error
+        expert infos in one and two passes, and the warnings only in the
+        frames built to trigger them (210-321).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('couchbase_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 322
+        assert protocols.count('Couchbase') == 282
+        assert protocols.count('Couchbase/JSON') == 35
+        assert protocols.count('Couchbase/JSON/JSON') == 1
+        assert protocols.count('TCP') == 3
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('couchbase_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= error',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('couchbase_coverage.pcap.gz'),
+                    '-Y', '_ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            frames = [int(f) for f in stdout.split()]
+            assert len(frames) == 101
+            assert min(frames) == 210 and max(frames) == 321
+
+    def test_couchbase_json_layer_limit(self, cmd_tshark, capture_file, test_env):
+        '''A SUBDOC_MULTI_LOOKUP response with 600 results (frame 209)
+        shows all 600 results and stops calling the JSON dissector before
+        the layer limit (it hit a DISSECTOR_ASSERT before the fix).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('couchbase_coverage.pcap.gz'),
+                '-Y', 'frame.number == 209',
+                '-Tfields', '-E', 'occurrence=a', '-e_ws.malformed',
+                '-ecouchbase.opcode', '-ecouchbase.multipath.value.length',
+                '-ecouchbase.value', '-ejson.object',
+            ), encoding='utf-8', env=test_env)
+        malformed, opcode, lengths, values, objects = stdout.rstrip('\n').split('\t')
+        assert malformed == ''
+        assert opcode == '0xd0'
+        assert values.split(',') == ['{}'] * 600
+        assert 0 < len(objects.split(',')) < 600
+
+    def test_couchbase_reassembly(self, cmd_tshark, capture_file, test_env):
+        '''A Set request in three segments is reassembled in frame 207;
+        two PDUs in one segment (frame 203) are both dissected.'''
+        stdout = subprocess.check_output((cmd_tshark, '-2',
+                '-r', capture_file('couchbase_coverage.pcap.gz'),
+                '-Y', 'frame.number in {203, 205, 206, 207}',
+                '-Tfields', '-E', 'occurrence=a', '-eframe.number',
+                '-etcp.reassembled_in', '-etcp.reassembled.length',
+                '-ecouchbase.opcode', '-ecouchbase.vbucket',
+                '-ecouchbase.key.collection_id', '-ecouchbase.value.length',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '203\t\t\t0x0a,0x0b\t0,0\t\t0,0',
+            '205\t207\t\t\t\t\t',
+            '206\t207\t\t\t\t\t',
+            '207\t\t2950\t0x01\t12\t0x00000008\t2911',
+        ]
+
+    def test_couchbase_fields(self, cmd_tshark, capture_file, test_env):
+        '''Collection IDs in the key, OBSERVE persist and replicate times
+        in the CAS field, and flexible framing extras.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('couchbase_coverage.pcap.gz'),
+                '-Y', 'frame.number in {13, 15, 141, 142, 188, 189}',
+                '-Tfields', '-E', 'occurrence=a', '-eframe.number',
+                '-ecouchbase.opcode', '-ecouchbase.key.collection_id',
+                '-ecouchbase.ttp', '-ecouchbase.ttr',
+                '-ecouchbase.flex_frame.frame.id',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '13\t0x00\t0x00000000\t\t\t',
+            '15\t0x00\t0x00000088\t\t\t',
+            '141\t0x92\t\t0\t0\t',
+            '142\t0x92\t\t100\t200\t',
+            '188\t0x01\t0x00000008\t\t\t0,1,1,5',
+            '189\t0x00\t0x00000008\t\t\t4',
+        ]
+
+    def test_couchbase_info(self, cmd_tshark, capture_file, test_env):
+        '''Client and server initiated messages are named in the Info
+        column.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('couchbase_coverage.pcap.gz'),
+                '-Y', 'frame.number in {1, 2, 100, 193, 194, 213, 322}',
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\tHello Request, Opcode: 0x1f',
+            '2\tHello Response, Opcode: 0x1f',
+            '100\tSubdoc Get Request, Opcode: 0xc5, vb:12',
+            '193\tClustermapChangeNotification Server Request, Opcode: 0x1, vb:0, JSON',
+            '194\tClustermapChangeNotification Server Response, Opcode: 0x1, Success',
+            '213\tUnknown opcode Server Request, Opcode: 0x7f, vb:0',
+            '322\t50001 → 11210 [PSH, ACK] Seq=1 Ack=1 Win=65535 Len=18',
+        ]
