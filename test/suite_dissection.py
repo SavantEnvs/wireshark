@@ -30791,3 +30791,89 @@ class TestDissectCtdb:
                 '63\t0\t1234\t\t',
                 '64\t15\t\t\t',
             ]
+
+
+class TestDissectCups:
+    def test_cups_frames(self, cmd_tshark, capture_file, test_env):
+        '''Every browse packet decodes as CUPS without malformed packets
+        or expert infos, in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cups_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 23
+        assert protocols.count('CUPS') == 23
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cups_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cups_ptype_fix(self, cmd_tshark, capture_file, test_env):
+        '''The printer type flags come from the parsed hexadecimal type:
+        type 3 is a remote class with no other flag, and a type of nine
+        digits gives flags, not malformed fields.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cups_coverage.pcap.gz'),
+                '-Y', 'frame.number <= 7',
+                '-Tfields', '-ecups.ptype', '-ecups.ptype.class',
+                '-ecups.ptype.remote', '-ecups.ptype.bw', '-ecups.ptype.staple',
+                '-ecups.ptype.duplex', '-ecups.ptype.variable',
+                '-ecups.ptype.implicit', '-ecups.ptype.default',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '0x00000003\tTrue\tTrue\tFalse\tFalse\tFalse\tFalse\tFalse\tFalse',
+            '0x00000002\tFalse\tTrue\tFalse\tFalse\tFalse\tFalse\tFalse\tFalse',
+            '0x0003ffff\tTrue\tTrue\tTrue\tTrue\tTrue\tTrue\tTrue\tTrue',
+            '0x00000000\tFalse\tFalse\tFalse\tFalse\tFalse\tFalse\tFalse\tFalse',
+            '0x0002aaaa\tFalse\tTrue\tFalse\tTrue\tFalse\tTrue\tFalse\tTrue',
+            '0x00015555\tTrue\tFalse\tTrue\tFalse\tTrue\tFalse\tTrue\tFalse',
+            '0x00030003\tTrue\tTrue\tFalse\tFalse\tFalse\tFalse\tTrue\tTrue',
+        ]
+
+    def test_cups_fields(self, cmd_tshark, capture_file, test_env):
+        '''State, URI and the optional quoted fields, which end at each
+        possible place.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cups_coverage.pcap.gz'),
+                '-Y', 'frame.number >= 4 && frame.number <= 19',
+                '-Tfields', '-ecups.state', '-ecups.uri', '-ecups.location',
+                '-ecups.information', '-ecups.make_model',
+            ), encoding='utf-8', env=test_env)
+        uri = 'ipp://192.0.2.1:631/printers/'
+        assert stdout.splitlines() == [
+            f'0x04\t{uri}none\tLab\tNothing\tGeneric',
+            f'0x05\t{uri}even\tHall\tEven bits\tModel E',
+            f'0x0a\t{uri}odd\tHall\tOdd bits\tModel O',
+            f'0x03\t{uri}implicit\t\t\t',
+            f'0x03\t{uri}p1\tLocation only\t\t',
+            f'0x03\t{uri}p2\tLoc\tInfo\t',
+            f'0x03\t{uri}p3\t\t\t',
+            f'0x03\t{uri}p4\tLoc\tInfo\t',
+            f'0x03\t{uri}p5\tLoc\t\t',
+            f'0x03\t{uri}p6\t\t\t',
+            f'0x03\t{uri}p6a\tLoc\t\t',
+            f'0x03\t{uri}p7\tLoc\tInfo\t',
+            f'0x03\t{uri}p8\t\t\t',
+            '0x03\t\t\t\t',
+            '\t\t\t\t',
+            '0x03\t\t\t\t',
+        ]
+
+    def test_cups_info(self, cmd_tshark, capture_file, test_env):
+        '''The Info column shows the URI and the state.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cups_coverage.pcap.gz'),
+                '-Y', 'frame.number >= 3 && frame.number <= 6',
+                '-Tfields', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        uri = 'ipp://192.0.2.1:631/printers/'
+        assert stdout.splitlines() == [
+            f'{uri}all (idle)',
+            f'{uri}none (processing)',
+            f'{uri}even (stopped)',
+            f'{uri}odd (0xa)',
+        ]
