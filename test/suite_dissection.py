@@ -28329,3 +28329,122 @@ class TestDissectCollectd:
                     '-Tfields', '-eframe.number', '-ecollectd.data.host',
                 ), encoding='utf-8', env=test_env)
             assert stdout.splitlines() == ['18\t']
+
+
+COMMUNITYID_OPTS = ('--enable-protocol', 'communityid')
+
+
+class TestDissectCommunityIdCoverage:
+    def test_communityid_coverage_protocols(self, cmd_tshark, capture_file, test_env):
+        '''TCP, UDP and SCTP over IPv4 and IPv6, ICMP, ICMPv6, IP-only
+        flows and ARP decode without malformed packets or error expert
+        infos, in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark, *COMMUNITYID_OPTS,
+                '-r', capture_file('communityid_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 50
+        assert protocols.count('TCP') == 9
+        assert protocols.count('UDP') == 4
+        assert protocols.count('SCTP') == 4
+        assert protocols.count('ICMP') == 12
+        assert protocols.count('ICMPv6') == 14
+        assert protocols.count('IPv4') == 5
+        assert protocols.count('IPv6') == 1
+        assert protocols.count('ARP') == 1
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *COMMUNITYID_OPTS, *passes,
+                    '-r', capture_file('communityid_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity == error',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_communityid_coverage_disabled(self, cmd_tshark, capture_file, test_env):
+        '''The post-dissector is disabled by default.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('communityid_coverage.pcap.gz'),
+                '-Y', 'communityid',
+                '-Tfields', '-eframe.number',
+            ), encoding='utf-8', env=test_env)
+        assert count_output(stdout) == 0
+
+    def test_communityid_coverage_hashes(self, cmd_tshark, capture_file, test_env):
+        '''Both directions of a flow get the same base64 Community ID, in
+        one and two passes: the flow tuple is ordered by address and, for
+        equal addresses, by port; ICMP and ICMPv6 request/reply types map
+        to one flow, other ICMP types are one-way. The values match an
+        independent implementation of the spec.'''
+        expected = [
+            # TCP, UDP, SCTP over IPv4 and IPv6
+            '1:G+HkHCrmxWLQgwEnSytJ6z6uCFc=', '1:G+HkHCrmxWLQgwEnSytJ6z6uCFc=',
+            '1:Edvcf81ME6Qo/r0fRsSIVNjisoI=', '1:Edvcf81ME6Qo/r0fRsSIVNjisoI=',
+            '1:5gXOI74HCSqmpHPGBc8BjxcpgMk=', '1:5gXOI74HCSqmpHPGBc8BjxcpgMk=',
+            '1:l9n/wii0FhNzvX30UjXZdKm+w8I=', '1:l9n/wii0FhNzvX30UjXZdKm+w8I=',
+            '1:23pZUX7PL9/X2W05aPxTKUZ4ijE=', '1:23pZUX7PL9/X2W05aPxTKUZ4ijE=',
+            '1:21iO4Z6N4CMCt2dmwL1LwJE6wTA=', '1:21iO4Z6N4CMCt2dmwL1LwJE6wTA=',
+            '1:YA/TWD5EC3duueNz5Hc/YMQA7+k=', '1:YA/TWD5EC3duueNz5Hc/YMQA7+k=',
+            '1:5lc1/pGGPl3tVkji4CATc8Mbc9s=', '1:5lc1/pGGPl3tVkji4CATc8Mbc9s=',
+            # ICMP
+            '1:IOfYZQoUwQ3ZLk3+qU6KcSd9W5k=', '1:IOfYZQoUwQ3ZLk3+qU6KcSd9W5k=',
+            '1:0D1d3qLLjJbPHm7eAxOWjC16h9A=', '1:0D1d3qLLjJbPHm7eAxOWjC16h9A=',
+            '1:er+k8JUl6Vq2EahG340/zVJL1H4=', '1:er+k8JUl6Vq2EahG340/zVJL1H4=',
+            '1:18ehIPO9Nw2OK1kup2dGTX3AlV0=', '1:Lw/H++8EqvWGMNB8l97QxDk5vw0=',
+            '1:JLJsmNnVClXDr2g2IxBTJoXhG80=', '1:JLJsmNnVClXDr2g2IxBTJoXhG80=',
+            '1:vd45MFHlio+j+MIFwhoVxuscjJI=', '1:ThXKU/sPwKQZICC+M14y1iRwWhw=',
+            # ICMPv6
+            '1:u2vMS3HiWth2lIMKHB1fjELshpQ=', '1:u2vMS3HiWth2lIMKHB1fjELshpQ=',
+            '1:twZ7KwCQHfwWp6Uon6NxD1a+VvM=', '1:xPSxJNw0+8RQKV4DudJEc623DnA=',
+            '1:crQslCaN356sZs9UmQG5h5ZOhI0=', '1:Ilg4oMT5cEP8nHg384C0O3MLdD0=',
+            '1:7zaWQt6zrruaqfx05UsgkBdCvOM=', '1:R9HBIi387RnKhKUU53rFlnl803U=',
+            '1:Sk22M0RiSzqPc3Ud7RgLkieiFvo=', '1:Sk22M0RiSzqPc3Ud7RgLkieiFvo=',
+            '1:npfSTuhDVNqJb1H+EZstSnVoZqA=', '1:se+UMPQk2jso9+d+QYWckdQc6Qs=',
+            '1:qxd1LeYGiZWewhdgFCEH4g39f1w=', '1:jo8C0T5d8MqnS7Nax6x05veuCRA=',
+            # IPv4 protocol 99 both ways, ARP, TCP in IPv4-in-IPv4,
+            # IPv4 protocol 99
+            '1:qo9ZnHKd7rxCPSh5JqG7GenNLoI=', '1:qo9ZnHKd7rxCPSh5JqG7GenNLoI=',
+            '', '1:io+k92jO3hn5C9Aij2hrfUo8N1U=',
+            '1:qo9ZnHKd7rxCPSh5JqG7GenNLoI=',
+        ]
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *COMMUNITYID_OPTS, *passes,
+                    '-r', capture_file('communityid_coverage.pcap.gz'),
+                    '-Tfields', '-ecommunityid.hash',
+                ), encoding='utf-8', env=test_env)
+            # Frames 48-50 (IPv6 next header 99 and an IPv4 tunnel without
+            # ports) are not checked: see the IP-only fallback.
+            assert stdout.splitlines()[:47] == expected
+
+    def test_communityid_coverage_hex_seed(self, cmd_tshark, capture_file, test_env):
+        '''With do_base64 off the SHA-1 is shown in hex, and the seed
+        changes the hash.'''
+        stdout = subprocess.check_output((cmd_tshark, *COMMUNITYID_OPTS,
+                '-o', 'communityid.do_base64:FALSE',
+                '-o', 'communityid.seed:1',
+                '-r', capture_file('communityid_coverage.pcap.gz'),
+                '-Y', 'frame.number in {1, 2, 17, 29, 43}',
+                '-Tfields', '-ecommunityid.hash',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1:0fa770e22323cae64615ff3703ef94359b852bfb',
+            '1:0fa770e22323cae64615ff3703ef94359b852bfb',
+            '1:0874a794fa7ea75657dae9881e71532e120569be',
+            '1:ffc7a685e07e9ab9f6c8f0bc74b749d107444734',
+            '1:0f7521bd9b04f235a18f4d19ceca646f373d9419',
+        ]
+
+    def test_communityid_coverage_ip_only(self, cmd_tshark, capture_file, test_env):
+        '''An IPv4 flow without ports is hashed with its IP protocol and
+        no ports; frames without IP (ARP) get no Community ID.'''
+        stdout = subprocess.check_output((cmd_tshark, *COMMUNITYID_OPTS,
+                '-r', capture_file('communityid_coverage.pcap.gz'),
+                '-Y', 'frame.number in {43, 44, 45, 47}',
+                '-Tfields', '-eframe.number', '-eip.proto', '-ecommunityid.hash',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '43\t99\t1:qo9ZnHKd7rxCPSh5JqG7GenNLoI=',
+            '44\t99\t1:qo9ZnHKd7rxCPSh5JqG7GenNLoI=',
+            '45\t\t',
+            '47\t99\t1:qo9ZnHKd7rxCPSh5JqG7GenNLoI=',
+        ]
