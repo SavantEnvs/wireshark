@@ -27919,3 +27919,116 @@ class TestDissectCoap:
             '100\tCON, MID:8193, POST, TKN:51 52, /a/aq\tfd00:db8::ff00:fe00:1234',
             '101\tACK, MID:8193, 2.04 Changed, TKN:51 52, /a/aq\t',
         ]
+
+
+class TestDissectCoapEap:
+    def test_coap_eap_protocols(self, cmd_tshark, capture_file, test_env):
+        '''The frame counts per protocol, and no malformed packets or expert
+        infos in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_eap_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 30
+        assert protocols.count('CoAP-EAP') == 22
+        assert protocols.count('CoAP') == 5
+        assert protocols.count('UDP') == 2
+        assert protocols.count('ID3v2') == 1
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('coap_eap_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+            # some field errors only show in the full tree
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('coap_eap_coverage.pcap.gz'),
+                    '-V',
+                ), encoding='utf-8', env=test_env)
+            assert 'Malformed Packet' not in stdout
+            assert 'Expert Info (Error' not in stdout
+
+    def test_coap_eap_exchange(self, cmd_tshark, capture_file, test_env):
+        '''The trigger, EAP Identity, EAP-PSK, Success and Failure, with
+        the CoAP and EAP Info columns merged.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_eap_coverage.pcap.gz'),
+                '-Y', 'frame.number <= 10',
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+                '-ecoap_eap.trigger_uri',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\tNON, MID:256, POST, TKN:01, /.well-known/coap-eap | CoAP-EAP Trigger\t/a/x',
+            '2\tNON, MID:2304, 2.04 Changed, TKN:01, /.well-known/coap-eap\t',
+            '3\tCON, MID:2305, POST, TKN:02 01, /a/x | Request, Identity\t',
+            '4\tACK, MID:2305, 2.01 Created, TKN:02 01, /a/x | Response, Identity\t',
+            '5\tCON, MID:2306, POST, TKN:02 02, /a/y | Request, Pre-Shared Key EAP (EAP-PSK) First Message\t',
+            '6\tACK, MID:2306, 2.04 Changed, TKN:02 02, /a/y | Response, Pre-Shared Key EAP (EAP-PSK) Second Message\t',
+            '7\tCON, MID:2307, POST, TKN:02 03, /a/z | Success\t',
+            '8\tACK, MID:2307, 2.04 Changed, TKN:02 03, /a/z\t',
+            '9\tCON, MID:2308, POST, TKN:03 01, /a/x | Request, Identity\t',
+            '10\tCON, MID:2309, POST, TKN:03 02, /a/x | Failure\t',
+        ]
+
+    def test_coap_eap_info(self, cmd_tshark, capture_file, test_env):
+        '''The CoAP-EAP_Info map: every key, unknown and text keys, keys
+        above 2^32, values of the wrong type skipped whole (including an
+        array or map in the cipher suites), maps and arrays that claim
+        more items than present, and a block-wise reassembled message.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_eap_coverage.pcap.gz'),
+                '-Y', 'coap_eap.cbormap_key',
+                '-Tfields', '-eframe.number', '-ecoap_eap.cbormap_key',
+                '-ecoap_eap.cipher_suites', '-ecoap_eap.rid_c',
+                '-ecoap_eap.rid_i', '-ecoap_eap.lifetime',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '3\t1,3\tAES-CCM-16-64-128, SHA-256 (0),A128GCM, SHA-256 (1),A256GCM, SHA-384 (2),ChaCha20/Poly1305, SHA-256 (3),ChaCha20/Poly1305, SHAKE256 (4),Unknown (9)\t\t0a0b\t',
+            '4\t1,2\tAES-CCM-16-64-128, SHA-256 (0)\t01\t\t',
+            '7\t4,7,4294967295\t\t\t\t8760',
+            '9\t4\t\t\t\t4294967296',
+            # the first cipher suite is a map: skipped, no leading comma
+            '11\t1,4,3,2\tA256GCM, SHA-384 (2),ChaCha20/Poly1305, SHA-256 (3)\t05\t\t',
+            '12\t1,2,4\t\t\t\t60',
+            '13\t4,2\t\t\t\t30',
+            '14\t4\t\t\t\t30',
+            '15\t1\tAES-CCM-16-64-128, SHA-256 (0),A128GCM, SHA-256 (1)\t\t\t',
+            '19\t1\tA128GCM, SHA-256 (1)\t\t\t',
+            # the reproducer coap_eap_cbor_misalign.py
+            '25\t1,60\tChaCha20/Poly1305, SHAKE256 (4)\t\t\t',
+            '26\t4,2\t\t0102\t\t',
+            '27\t1,4\t\t\t\t60',
+            '28\t300,4294967295\t\t\t\t',
+        ]
+
+    def test_coap_eap_media_without_info(self, cmd_tshark, capture_file, test_env):
+        '''An ID3v2 picture in an MP3 over HTTP that claims to be
+        application/coap-eap reaches CoAP-EAP without a
+        media_content_info_t (this asserted before the fix).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_eap_coverage.pcap.gz'),
+                '-Y', 'frame.number >= 29',
+                '-Tfields', '-eframe.number', '-e_ws.col.protocol',
+                '-eeap.code', '-eeap.type', '-e_ws.malformed',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '29\tCoAP-EAP\t1\t1\t',
+            '30\tID3v2\t\t\t',
+        ]
+
+    def test_coap_eap_udp_port(self, cmd_tshark, capture_file, test_env):
+        '''With the udp_port preference CoAP-EAP is registered on a UDP
+        port and hands the message to CoAP.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('coap_eap_coverage.pcap.gz'),
+                '-o', 'coap_eap.udp_port:5690',
+                '-Y', 'udp.port == 5690',
+                '-Tfields', '-eframe.number', '-e_ws.col.protocol',
+                '-eeap.identity',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '23\tCoAP-EAP\tport@example.org',
+            '24\tCoAP\t',
+        ]
