@@ -31422,3 +31422,72 @@ class TestDissectData:
                 '-Y', 'frame.number == 6',
             ), encoding='utf-8', env=test_env)
         assert 'Not dissected data bytes (1 byte):' in stdout
+
+
+class TestDissectDaytime:
+    def test_daytime_frames(self, cmd_tshark, capture_file, test_env):
+        '''UDP and TCP on port 13 decode as DAYTIME, and with Decode As
+        the two frames on UDP port 1313 too, with no malformed packets or
+        warnings in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('daytime_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 23
+        assert protocols.count('DAYTIME') == 9
+        assert protocols.count('TCP') == 12
+        assert protocols.count('UDP') == 2
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('daytime_coverage.pcap.gz'),
+                    '-d', 'udp.port==1313,daytime',
+                    '-Tfields', '-e_ws.col.protocol',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.split().count('DAYTIME') == 11
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('daytime_coverage.pcap.gz'),
+                    '-d', 'udp.port==1313,daytime',
+                    '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_daytime_port_13(self, cmd_tshark, capture_file, test_env):
+        '''Responses come from port 13 and carry the time string, over UDP
+        and TCP (also split over two segments); requests have none.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('daytime_coverage.pcap.gz'),
+                '-Y', 'daytime',
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+                '-edaytime.response_request', '-edaytime.string',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\tDAYTIME Request\tFalse\t',
+            '2\tDAYTIME Response\tTrue\tSunday, November 1, 2026 12:00:00-UTC\\r\\n',
+            '3\tDAYTIME Request\tFalse\t',
+            '4\tDAYTIME Response\tTrue\tSun Nov  1 12:00:01 2026\\n',
+            '5\tDAYTIME Response\tTrue\t01-11-2026 12:00:02 ��t�',
+            '9\tDAYTIME Request\tFalse\t',
+            '10\tDAYTIME Response\tTrue\tSun, 01 Nov 2026 12:00:03 +0000\\r\\n',
+            '17\tDAYTIME Response\tTrue\t2026-11-01T12:00:04Z',
+            '18\tDAYTIME Response\tTrue\t\\r\\n',
+        ]
+
+    def test_daytime_other_port(self, cmd_tshark, capture_file, test_env):
+        '''On a port set with Decode As or the port preference, the tree
+        tells a response from a request like the Info column and shows
+        the time string (before "Daytime: Tell a response from a request
+        on any port in the tree" the tree compared with port 13).'''
+        for opts in (('-d', 'udp.port==1313,daytime'),
+                     ('-o', 'daytime.udp.port:1313')):
+            stdout = subprocess.check_output((cmd_tshark,
+                    '-r', capture_file('daytime_coverage.pcap.gz'), *opts,
+                    '-Y', 'daytime && udp.port == 1313',
+                    '-Tfields', '-eframe.number', '-e_ws.col.info',
+                    '-edaytime.response_request', '-edaytime.string',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.splitlines() == [
+                '22\tDAYTIME Request\tFalse\t',
+                '23\tDAYTIME Response\tTrue\tSun Nov  1 12:00:00 2026\\r\\n',
+            ]
