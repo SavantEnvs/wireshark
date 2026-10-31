@@ -29911,3 +29911,122 @@ class TestDissectCpfi:
         # Frame 18 is cut off before the footer.
         assert lines[13].startswith('18\t0x00000011\t0x00000022\t0x00000006\t')
         assert lines[13].endswith('\t\t')
+
+
+class TestDissectCpha:
+    def test_cpha_protocols(self, cmd_tshark, capture_file, test_env):
+        '''20 frames are CPHA, the last two (bad magic number, too short)
+        are not, and none is malformed or has an expert info, in one and
+        two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cpha_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 22
+        assert protocols == ['CPHA'] * 20 + ['UDP'] * 2
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cpha_coverage.pcap.gz'),
+                    '-V',
+                    '-Y', '_ws.malformed || _ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cpha_last_packet_in_interface_states(self, cmd_tshark, capture_file, test_env):
+        '''The last packet seen from each cluster member is in the
+        Interface States tree, each with its own cluster number (they
+        were added to the payload tree before the fix, and the cluster
+        numbers were appended to the Interface States item).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cpha_coverage.pcap.gz'),
+                '-Y', 'frame.number == 1',
+                '-V', '-O', 'cpha',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        start = lines.index('        Interface States')
+        assert lines[start + 1:start + 8] == [
+            '            Interfaces up in the Inbound: 3',
+            '            Interfaces assumed up in the Inbound: 1',
+            '            Interfaces up in the Outbound: 2',
+            '            Interfaces assumed up in the Outbound: 0',
+            '            Last packet seen: 0 (Cluster 0)',
+            '            Last packet seen: 1 (Cluster 1)',
+            '            Last packet seen: -1 (Cluster 2)',
+        ]
+        assert lines[start - 4:start] == [
+            '        Machines States',
+            '            State node: Active/Active-Attention (4) (Nodes 0)',
+            '            State node: Standby (2) (Nodes 1)',
+            '            State node: Down/Dead (0) (Nodes 2)',
+        ]
+
+    def test_cpha_info(self, cmd_tshark, capture_file, test_env):
+        '''The version and opcode in the Info column, known or not.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cpha_coverage.pcap.gz'),
+                '-Y', 'cpha',
+                '-Tfields', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        info = stdout.splitlines()
+        assert [i.split(' - ')[0] for i in info] == [
+            'CPHAv2: FWHA_MY_STATE',
+            'CPHAv1: FWHA_MY_STATE',
+            'CPHAv2920: FWHA_MY_STATE',
+            'CPHAv2921: FWHA_MY_STATE',
+            'CPHAv2921: FWHA_MY_STATE',
+            'CPHAv3: FWHA_QUERY_STATE',
+            'CPHAv6: FWHA_IF_PROBE_REQ',
+            'CPHAv6: FWHA_IF_PROBE_REPLY',
+            'CPHAv530: FWHA_IFCONF_REQ',
+            'CPHAv530: FWHA_IFCONF_REPLY',
+            'CPHAv530: FWHA_IFCONF_REPLY',
+            'CPHAv1501: FWHA_LB_CONF',
+            'CPHAv1501: FWHA_LB_CONFIRM',
+            'CPHAv2000: FWHA_POLICY_CHANGE',
+            'CPHAv2000: FWHA_POLICY_CHANGE',
+            'CPHAv2000: FWHA_POLICY_CHANGE',
+            'CPHAv2900: FWHAP_SYNC',
+            'CPHAv2900: Unknown OpCode',
+            'CPHAv2900: Unknown 99',
+            'CPHAv9999: FWHA_QUERY_STATE',
+        ]
+
+    def test_cpha_fields(self, cmd_tshark, capture_file, test_env):
+        '''The policy ID is absent for version 1 (4.1), the states follow
+        the report code, and the payload of each opcode.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cpha_coverage.pcap.gz'),
+                '-Y', 'cpha',
+                '-Tfields', '-eframe.number', '-ecpha.policy_id',
+                '-ecpha.report_code', '-ecpha.ha_mode', '-ecpha.state_node',
+                '-ecpha.cluster_last_packet', '-ecpha.ifn',
+                '-ecpha.reported_ifs', '-ecpha.ethernet_addr',
+                '-ecpha.if_trusted', '-ecpha.ip', '-ecpha.slot_num',
+                '-ecpha.machine_num', '-ecpha.seed', '-ecpha.hash_len',
+                '-ecpha.status', '-ecpha.unknown_data',
+            ), encoding='utf-8', env=test_env)
+        lines = [l.rstrip('\t') for l in stdout.splitlines()]
+        assert lines == [
+            '1\t7\t3\t2\t4,2,0\t0,1,-1',
+            '2\t\t1\t3\t1,3',
+            '3\t7\t2\t4\t\t5,6',
+            '4\t7\t0\t0',
+            '5\t7\t1\t1\t0',
+            '6\t7',
+            '7\t7\t\t\t\t\t2',
+            '8\t7\t\t\t\t\t2',
+            '9\t7',
+            '10\t7\t\t\t\t\t\t3\t00:00:0c:00:00:02\tTrue\t192.0.2.2',
+            '11\t7\t\t\t\t\t\t3\t00:00:0c:00:00:03\tFalse\t198.51.100.1',
+            '12\t7\t\t\t\t\t\t\t\t\t\t-1\t2\t3735928559\t-5',
+            '13\t7' + '\t' * 15 + '0001000200030004',
+            '14\t8' + '\t' * 14 + '1',
+            '15\t8' + '\t' * 14 + '2',
+            '16\t8' + '\t' * 14 + '3',
+            '17\t7' + '\t' * 15 + 'cafebabe0102',
+            '18\t7' + '\t' * 15 + '0001',
+            '19\t7' + '\t' * 15 + '0203',
+            '20\t7',
+        ]
