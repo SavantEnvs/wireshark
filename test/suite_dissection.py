@@ -29668,3 +29668,144 @@ class TestDissectCouchbase:
             '213\tUnknown opcode Server Request, Opcode: 0x7f, vb:0',
             '322\t50001 → 11210 [PSH, ACK] Seq=1 Ack=1 Win=65535 Len=18',
         ]
+
+
+CP2179_DECODE_AS = ('-d', 'tcp.port==2179,cp2179', '-d', 'rtacser.data,cp2179')
+
+
+class TestDissectCp2179:
+    def test_cp2179_protocols(self, cmd_tshark, capture_file, test_env):
+        '''Every CP2179 message type over TCP, RTAC Serial and Exported PDU
+        decodes without malformed packets or warnings, in one and two
+        passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cp2179_coverage.pcapng.gz'),
+                *CP2179_DECODE_AS,
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 53
+        assert protocols.count('CP2179') == 46
+        assert protocols.count('TCP') == 7
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cp2179_coverage.pcapng.gz'),
+                    *CP2179_DECODE_AS,
+                    '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cp2179_request_tracking(self, cmd_tshark, capture_file, test_env):
+        '''Each response is paired with the latest earlier request with
+        the same address word, the same in one and two passes; a
+        response from another RTU has no request.'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cp2179_coverage.pcapng.gz'),
+                    *CP2179_DECODE_AS,
+                    '-Y', 'cp2179.request_frame',
+                    '-Tfields', '-eframe.number', '-ecp2179.request_frame',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.splitlines() == [
+                '5\t4', '7\t6', '9\t8', '11\t10', '13\t12', '15\t14', '17\t16',
+                '19\t18', '21\t20', '23\t22', '25\t24', '27\t26', '29\t28',
+                '31\t30', '33\t32', '35\t32', '37\t32', '40\t32', '49\t48',
+                '51\t50', '53\t52',
+            ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cp2179_coverage.pcapng.gz'),
+                *CP2179_DECODE_AS,
+                '-Y', 'frame.number == 43',
+                '-Tfields', '-ecp2179.RTUAddress', '-ecp2179.request_frame',
+            ), encoding='utf-8', env=test_env)
+        assert stdout == '5\t\n'
+
+    def test_cp2179_requested_points(self, cmd_tshark, capture_file, test_env):
+        '''The reproducers of "CP2179: Do not read more requested points
+        than the request had": a special calculation response to a
+        request without points shows no values, a scan inclusive response
+        with 200 values to a request for one point shows one.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cp2179_coverage.pcapng.gz'),
+                *CP2179_DECODE_AS,
+                '-Y', 'frame.number >= 50',
+                '-Tfields', '-e_ws.col.info', '-ecp2179.numberofcharacters',
+                '-ecp2179.analogdata', '-ecp2179.specialcalc',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            'Basic Scan Request [ Request a Range of Special Calc ]\t0\t\t',
+            'Special Calc Response\t8\t\t',
+            'Scan Inclusive Request [ 16 Bit Analog ]\t2\t\t',
+            'Scan Inclusive Response [ 16 Bit Analog ]\t400\t5\t',
+        ]
+        # A range response with more values than the request shows only
+        # the requested points; a scan inclusive request whose end is below
+        # its start has no points
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cp2179_coverage.pcapng.gz'),
+                *CP2179_DECODE_AS,
+                '-Y', 'frame.number == 19 || frame.number == 21 || frame.number == 23',
+                '-O', 'cp2179', '-V',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.count('Special Calculation ') == 2
+        assert 'Special Calculation 9 : ' in stdout
+        assert 'Special Calculation 11 : ' in stdout
+        assert stdout.count('Analog (16 bit) ') == 4
+        for label in ('Analog (16 bit) 10 : 10', 'Analog (16 bit) 11 : -11',
+                      'Analog (16 bit) 12 : 12', 'Analog (16 bit) 13 : -13'):
+            assert label in stdout
+
+    def test_cp2179_telnet(self, cmd_tshark, capture_file, test_env):
+        '''0xFF 0xFF is unescaped on TCP (Telnet), not on RTAC Serial, and
+        not with cp2179.telnetclean off.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cp2179_coverage.pcapng.gz'),
+                *CP2179_DECODE_AS,
+                '-Y', 'frame.number == 9 || frame.number == 49',
+                '-O', 'cp2179', '-V',
+            ), encoding='utf-8', env=test_env)
+        values = [l.strip() for l in stdout.splitlines() if 'Analog (16 bit)' in l]
+        assert values == [
+            'Analog (16 bit) 0 : 100', 'Analog (16 bit) 1 : -1',
+            'Analog (16 bit) 2 : -32768',
+            'Analog (16 bit) 0 : -1', 'Analog (16 bit) 1 : 255',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cp2179_coverage.pcapng.gz'),
+                *CP2179_DECODE_AS, '-o', 'cp2179.telnetclean:FALSE',
+                '-Y', 'frame.number == 9',
+                '-O', 'cp2179', '-V',
+            ), encoding='utf-8', env=test_env)
+        values = [l.strip() for l in stdout.splitlines() if 'Analog (16 bit)' in l]
+        assert values == [
+            'Analog (16 bit) 0 : 100', 'Analog (16 bit) 1 : -1',
+            'Analog (16 bit) 2 : -1', 'Analog (16 bit) 3 : -32768',
+        ]
+
+    def test_cp2179_messages(self, cmd_tshark, capture_file, test_env):
+        '''Supervisory control, RTU control and time tagged records.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cp2179_coverage.pcapng.gz'),
+                *CP2179_DECODE_AS,
+                '-Y', 'cp2179.sbo_requestpoint || cp2179.resetacc_requestpoint',
+                '-Tfields', '-eframe.number', '-ecp2179.commandcode',
+                '-ecp2179.sbo_requestpoint', '-ecp2179.resetacc_requestpoint',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '24\t0x10\t5\t', '25\t\t5\t', '26\t0x11\t6\t', '27\t\t6\t',
+            '32\t\t\t4', '33\t\t\t4',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cp2179_coverage.pcapng.gz'),
+                *CP2179_DECODE_AS,
+                '-Y', 'cp2179.timetag.numsets',
+                '-Tfields', '-eframe.number', '-ecp2179.timetag.moredata',
+                '-ecp2179.timetag.numsets', '-ecp2179.timetag.event.type',
+                '-ecp2179.timetag.event.hour', '-ecp2179.timetag.event.second',
+                '-ecp2179.analogdata',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '35\t1\t2\t1,2\t13,23\t30,59\t1000,-1000,7,-7',
+            '37\t0\t0\t\t\t\t',
+        ]
