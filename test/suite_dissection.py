@@ -29036,3 +29036,192 @@ class TestDissectCoseCoverage:
         lines = [l.strip() for l in stdout.splitlines()]
         assert 'Label: d (-3)' in lines
         assert 'Label: y (-3)' not in lines
+
+
+class TestDissectCosem:
+    def test_cosem_protocols(self, cmd_tshark, capture_file, test_env):
+        '''The frame counts per protocol, and no malformed packets or
+        error expert infos in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosem_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 111
+        assert protocols.count('DLMS/COSEM') == 92
+        assert protocols.count('DLMS') == 16
+        assert protocols.count('TCP') == 3
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cosem_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= "error"',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cosem_compact_array_of_null(self, cmd_tshark, capture_file, test_env):
+        '''A compact array whose type description is nested arrays of
+        65535 nulls stops at the first null element (it took 65535^3
+        iterations before "COSEM: Do not let a length move back, stop
+        repeating empty compact elements").'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosem_coverage.pcap.gz'),
+                '-Y', 'frame.number == 109',
+                '-V', '-O', 'dlms',
+            ), encoding='utf-8', env=test_env, timeout=60)
+        lines = [l.strip() for l in stdout.splitlines()]
+        start = lines.index('Compact Array (1 elements)')
+        assert lines[start + 1] == 'Type Description'
+        assert 'Length: 10' in lines[start + 2:]
+        assert lines[-5:] == [
+            '[1] Array (65535 elements)',
+            '[1] Array (65535 elements)',
+            '[1] Array (65535 elements)',
+            '[1] Null',
+            '',
+        ]
+
+    def test_cosem_info(self, cmd_tshark, capture_file, test_env):
+        '''The Info column names the APDU, the class, attribute or method
+        and the instance (by name for known OBIS codes).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosem_coverage.pcap.gz'),
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        info = dict(l.split('\t', 1) for l in stdout.splitlines())
+        assert info['1'] == 'AARQ'
+        assert info['2'] == 'AARE'
+        assert info['9'] == 'Get-Request-Normal clock.time Clock'
+        assert info['11'] == 'Get-Request-Normal profile_generic.buffer Event log 8'
+        assert info['15'] == 'Get-Response-Normal (read-write-denied)'
+        assert info['18'] == 'Get-Response-With-Datablock (block 1)'
+        assert info['19'] == 'Get-Request-Next (block 1)'
+        assert info['20'] == 'Get-Response-With-Datablock (block 2) (last block)'
+        assert info['21'] == 'Get-Response-With-Datablock (data-block-unavailable)'
+        assert info['28'] == 'Set-Request-With-First-Datablock image_transfer.image_block_size 0.0.44.0.0.255 (block 1)'
+        assert info['30'] == 'Set-Request-With-Datablock (block 2) (last block)'
+        assert info['34'] == 'Action-Request-Normal register.reset 1.0.1.8.0.255'
+        assert info['37'] == 'Action-Response-Normal (read-write-denied)'
+        assert info['43'] == 'Event-Notification-Request data.value COSEM logical device name'
+        assert info['44'] == 'Exception-Response'
+        assert info['47'] == 'Get-Request-Normal data.logical_name 1.0.1.8.0.255'
+        assert info['69'] == 'Get-Request-Normal 4242.2 1.0.1.8.0.255'
+        assert info['79'] == 'RLRQ'
+        assert info['80'] == 'RLRE'
+        assert [info[str(n)] for n in range(90, 109)] == [
+            'HDLC SNRM', 'HDLC UA', 'HDLC SNRM', 'HDLC UA', 'HDLC UA',
+            'HDLC SNRM', 'AARQ', 'HDLC RR', 'AARE', 'HDLC I', 'HDLC RR',
+            'Get-Response-Normal', 'HDLC RNR', 'HDLC DISC', 'HDLC FRMR',
+            'HDLC UI', 'Unknown HDLC frame', 'HDLC DISC', 'HDLC DISC',
+        ]
+
+    def test_cosem_association(self, cmd_tshark, capture_file, test_env):
+        '''The ACSE fields and the InitiateRequest and InitiateResponse
+        in the user-information.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosem_coverage.pcap.gz'),
+                '-Y', 'cosem.AARQ_apdu_element || cosem.AARE_apdu_element',
+                '-Tfields', '-eframe.number', '-ecosem.mechanism_name',
+                '-ecosem.result', '-edlms.proposed_quality_of_service.count',
+                '-edlms.client_max_receive_pdu_size',
+                '-edlms.server_max_receive_pdu_size', '-edlms.objectname',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '1\t2.16.756.5.8.2.1\t\t5\t1200\t\t',
+            '2\t2.16.756.5.8.2.5\t0\t\t\t500\t7',
+            '3\t2.16.756.5.8.2.5\t\t\t1200\t\t',
+            '4\t\t1\t\t\t500\t7',
+            '5\t\t\t\t\t\t',
+            '6\t\t\t\t\t\t',
+            '7\t\t\t\t\t\t',
+            '8\t\t2\t\t\t\t',
+            '96\t\t\t\t1200\t\t',
+            '98\t\t0\t\t\t500\t7',
+        ]
+
+    def test_cosem_reassembly(self, cmd_tshark, capture_file, test_env):
+        '''Datablocks and HDLC segments are reassembled and the result is
+        dissected, in one and two passes.'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cosem_coverage.pcap.gz'),
+                    '-Y', 'dlms.fragment.count',
+                    '-Tfields', '-eframe.number', '-edlms.fragment',
+                    '-edlms.reassembled_length',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.splitlines() == [
+                '20\t18,20\t128',
+                '30\t28,30\t67',
+                '101\t99,101\t69',
+            ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosem_coverage.pcap.gz'),
+                '-Y', 'frame.number == 20',
+                '-V', '-O', 'dlms',
+            ), encoding='utf-8', env=test_env)
+        lines = [l.strip() for l in stdout.splitlines()]
+        start = lines.index('Reassembled Data')
+        assert lines[start + 1:start + 5] == [
+            'Array (6 elements)',
+            '[1] Structure',
+            'Octet String (length 12) (2024/05/01 00:00:00.00)',
+            'Double Long Unsigned: 0',
+        ]
+
+    def test_cosem_data_types(self, cmd_tshark, capture_file, test_env):
+        '''The A-XDR data types (except the floats, which depend on the
+        locale) and compact arrays.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cosem_coverage.pcap.gz'),
+                '-Y', 'frame.number == 12 || frame.number == 14',
+                '-V', '-O', 'dlms',
+            ), encoding='utf-8', env=test_env)
+        lines = [l.strip() for l in stdout.splitlines()]
+        start = lines.index('Structure')
+        assert lines[start + 1:start + 18] == [
+            'Null',
+            'Boolean: true',
+            'Boolean: false',
+            'Bit-string (bits: 12, bytes: 2):',
+            'Bit-string (bits: 16, bytes: 2):',
+            'Double Long: -123456',
+            'Double Long Unsigned: 3000000000',
+            'Octet String (length 3)',
+            'Visible String (length 10)',
+            'UTF8 String (length 6)',
+            'BCD: 0x42',
+            'Integer: -5',
+            'Long: -1000',
+            'Unsigned: 200',
+            'Long Unsigned: 60000',
+            # Long64 and Long64 Unsigned are printed with each other's
+            # format, so they are not checked here.
+            lines[start + 16],
+            lines[start + 17],
+        ]
+        assert lines[start + 18] == 'Enum: 30'
+        assert lines[start + 21:start + 30] == [
+            'Date Time',
+            'Date',
+            'Time',
+            "Don't Care",
+            'Array (3 elements)',
+            '[1] Unsigned: 1',
+            '[2] Unsigned: 2',
+            '[3] Unsigned: 3',
+            'Array (0 elements)',
+        ]
+        assert lines[start + 30:start + 32] == [
+            'Octet String (length 200)',
+            'Visible String (length 3)',
+        ]
+        start = lines.index('Compact Array (3 elements)')
+        assert lines[start + 1:start + 8] == [
+            'Type Description',
+            'Length: 9',
+            '[1] Structure',
+            'Array (1 elements)',
+            '[1] Unsigned: 2',
+            'Long Unsigned: 513',
+            '[2] Structure',
+        ]
