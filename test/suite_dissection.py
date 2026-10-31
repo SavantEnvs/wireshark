@@ -30030,3 +30030,180 @@ class TestDissectCpha:
             '19\t7' + '\t' * 15 + '0203',
             '20\t7',
         ]
+
+
+class TestDissectCql:
+    def test_cql_protocols(self, cmd_tshark, capture_file, test_env):
+        '''134 of 158 frames are CQL, none is malformed or has an error
+        expert info in one and two passes; the only warnings are the
+        unknown request opcode and result kind (frames 112, 115).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cql_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 158
+        assert protocols.count('CQL') == 134
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cql_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= "Warning"',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.split() == ['112', '115']
+
+    def test_cql_v5_framing_two_passes(self, cmd_tshark, capture_file, test_env):
+        '''After READY (frame 127) or AUTHENTICATE (frame 144) a v5
+        connection uses the v5 framing, also on the second pass when a
+        later READY (frames 137, 148) comes inside a v5 frame (before the
+        fix the second pass started the v5 framing after the last READY
+        and dissected the frames in between as envelopes).'''
+        outputs = []
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cql_coverage.pcap.gz'),
+                    '-Y', 'cql && frame.number >= 124 && frame.number <= 149',
+                    '-Tfields', '-eframe.number', '-ecql.v5_is_self_contained',
+                    '-ecql.opcode', '-ecql.stream',
+                ), encoding='utf-8', env=test_env)
+            outputs.append(stdout.splitlines())
+        assert outputs[0] == outputs[1]
+        assert outputs[1] == [
+            '124\t\t5\t0',
+            '125\t\t6\t0',
+            '126\t\t1\t1',
+            '127\t\t2\t1',
+            '128\tTrue\t7\t2',
+            '129\tTrue\t8\t2',
+            '130\tTrue\t9\t3',
+            '131\tTrue\t8\t3',
+            '132\tTrue\t10,7\t4,5',
+            '133\tTrue\t8,8\t4,5',
+            '135\tTrue\t7\t6',
+            '136\tTrue\t8\t6',
+            '137\tTrue\t2\t7',
+            '138\tTrue\t5\t8',
+            '139\tFalse\t6\t8',
+            '143\t\t1\t0',
+            '144\t\t3\t0',
+            '145\tTrue\t15\t1',
+            '146\tTrue\t16\t1',
+            '147\tTrue\t11\t2',
+            '148\tTrue\t2\t2',
+            '149\tTrue\t12\t-1',
+        ]
+
+    def test_cql_info(self, cmd_tshark, capture_file, test_env):
+        '''The Info column of requests and responses of every type.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cql_coverage.pcap.gz'),
+                '-Y', 'cql',
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        info = dict(l.split('\t', 1) for l in stdout.splitlines())
+        assert info['4'] == 'v4 C->S Type OPTIONS'
+        assert info['7'] == 'v4 S->C Type AUTHENTICATE'
+        assert info['15'] == 'v4 S->C Type RESULT: Set Keyspace'
+        assert info['16'] == 'v4 C->S Type QUERY: SELECT * FROM items WHERE id = :id AND n = :n'
+        assert info['17'] == 'v4 S->C Type RESULT: Rows (2 rows)'
+        assert info['27'] == 'v4 S->C Type RESULT: Prepared'
+        assert info['29'] == 'v4 S->C Type RESULT: VOID'
+        assert info['32'] == 'v4 C->S Type BATCH'
+        assert info['39'] == 'v4 S->C Type RESULT: Schema Change'
+        assert info['46'] == 'v4 S->C Type EVENT'
+        assert info['50'] == 'v4 S->C Type ERROR: Server error (0x0)'
+        assert info['64'] == 'v4 S->C Type ERROR: Write_timeout (0x1100)'
+        assert info['86'] == 'v4 S->C Type ERROR: Unknown error code (0x9999)'
+        assert info['112'] == 'v4 C->S Type Unknown (0x04)'
+        assert info['113'] == 'v4 S->C Type Unknown (0x11)'
+        assert info['115'] == 'v4 S->C Type RESULT: Unknown kind'
+        assert info['119'] == 'v2 C->S Type OPTIONS'
+        assert info['128'] == 'v5 C->S Type QUERY: SELECT * FROM v5'
+        assert info['149'] == 'v5 S->C Type EVENT'
+
+    def test_cql_request_response(self, cmd_tshark, capture_file, test_env):
+        '''Responses point to their requests on the same stream (two of
+        them in one segment or one v5 frame), and with two passes the
+        requests point to their responses; events and a response on a
+        stream without a request point nowhere.'''
+        stdout = subprocess.check_output((cmd_tshark, '-2',
+                '-r', capture_file('cql_coverage.pcap.gz'),
+                '-Y', 'cql && frame.number >= 84 && frame.number <= 95',
+                '-Tfields', '-eframe.number', '-ecql.response_to',
+                '-ecql.response_in',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '84\t83\t',
+            '85\t\t86',
+            '86\t85\t',
+            '87\t\t88,88',
+            '88\t87,87\t',
+            '89\t\t92',
+            '92\t89\t',
+            '93\t\t',
+            '94\t\t95',
+            '95\t94\t',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cql_coverage.pcap.gz'),
+                '-Y', 'cql.opcode == 12',
+                '-Tfields', '-eframe.number', '-ecql.stream', '-ecql.response_to',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == ['46\t-1\t', '47\t-1\t', '48\t-1\t', '149\t-1\t']
+
+    def test_cql_rows(self, cmd_tshark, capture_file, test_env):
+        '''Values of the rows results: simple types, collections, UDT and
+        tuple values; varints of 1 to 8 octets; a RESULT reassembled from
+        three segments.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cql_coverage.pcap.gz'),
+                '-Y', 'frame.number == 17',
+                '-Tfields', '-ecql.ascii', '-ecql.bigint', '-ecql.int',
+                '-ecql.ipv4', '-ecql.ipv6', '-ecql.port',
+                '-ecql.result.rows.list_size', '-ecql.result.rows.map_size',
+                '-ecql.result.rows.set_size',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.split('\t') == [
+            'hello,x,y', '-1234567890123,1,2', '42,1,2,3,12345,7,1,2,3',
+            '198.51.100.7', '2001:db8::1', '9042', '3,2,1,2,0', '2', '2\n']
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cql_coverage.pcap.gz'),
+                '-Y', 'frame.number == 19',
+                '-Tfields', '-ecql.varint', '-ecql.varint64', '-ecql.scale',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.split('\t') == [
+            '1,258,66051,16909060,16,4113,1052946,269554195',
+            '4328719365,1108152157446,283686952306183,72623859790382856,'
+            '69005873940,17665503728661,4522368954537238,1157726452361532951',
+            '1,2,3,4,5,6,7,8\n']
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cql_coverage.pcap.gz'),
+                '-Y', 'frame.number == 92 || frame.number == 135',
+                '-Tfields', '-eframe.number', '-etcp.segment', '-ecql.opcode',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == ['92\t90,91,92\t8', '135\t134,135\t7']
+
+    def test_cql_lz4(self, cmd_tshark, capture_file, test_env):
+        '''LZ4 compressed envelopes (v3) and v5 frames are decompressed;
+        bodies that do not decompress are shown as compressed bytes.'''
+        version = subprocess.check_output((cmd_tshark, '-v'), encoding='utf-8', env=test_env)
+        if '+LZ4' not in version:
+            pytest.skip('Requires LZ4')
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cql_coverage.pcap.gz'),
+                '-Y', '(frame.number >= 101 && frame.number <= 106) || frame.number >= 155',
+                '-Tfields', '-eframe.number', '-e_ws.col.info', '-ecql.varchar',
+                '-ecql.raw_compressed_bytes', '-ecql.v5_message_length.uncompressed',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '101\tv3 C->S Type QUERY: SELECT * FROM compressed\t\t\t',
+            '102\tv3 S->C Type RESULT: Rows (3 rows)\tcompressed row 0,compressed row 1,compressed row 2\t\t',
+            '103\tv3 C->S Type QUERY\t\t7fffffff6761726261676521\t',
+            '104\tv3 S->C Type RESULT\t\t00000001\t',
+            '105\tv3 C->S Type QUERY\t\t00000014ffffffffffff\t',
+            '106\tv3 S->C Type RESULT: VOID\t\t\t',
+            '155\tv5 C->S Type QUERY: SELECT * FROM lz\t\t\t0',
+            '156\tv5 S->C Type RESULT: Rows (5 rows)\trow 0,row 1,row 2,row 3,row 4\t\t83',
+            '157\tv5 C->S Type OPTIONS\t\t\t9',
+            '158\tv5 S->C Type SUPPORTED\t\t\t11',
+        ]
