@@ -28906,3 +28906,133 @@ class TestDissectCorosyncTotemsrp:
             ), encoding='utf-8', env=test_env)
         assert stdout.strip() == ('2001:db8::1,2001:db8::1,2001:db8::1,'
                                   '2001:db8::1,2001:db8::2,2001:db8::3,2001:db8::3')
+
+
+class TestDissectCoseCoverage:
+    def test_cose_protocols(self, cmd_tshark, capture_file, test_env):
+        '''The frame counts per protocol, and no malformed packets or
+        warnings in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cose_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 34
+        assert protocols.count('HTTP') == 11
+        assert protocols.count('EDHOC') == 1
+        assert protocols.count('AMQP') == 2
+        assert protocols.count('TCP') == 20
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cose_coverage.pcap.gz'),
+                '-Y', 'cose',
+                '-Tfields', '-eframe.number',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.split() == ['4', '6', '8', '10', '12', '14', '16',
+                                  '18', '20', '22', '24', '33']
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cose_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= "warning"',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cose_message_types(self, cmd_tshark, capture_file, test_env):
+        '''Every message type, chosen by the cose-type media type
+        parameter (quoted or not, in any case, after another parameter,
+        with a +cose suffix) or by the tag, and COSE_Key(Set).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cose_coverage.pcap.gz'),
+                '-Y', 'cose',
+                '-V', '-O', 'amqp,cose',
+            ), encoding='utf-8', env=test_env)
+        types = [l.split(': ', 1)[1] for l in stdout.splitlines()
+                 if l.lstrip().startswith('CBOR Object Signing and Encryption: ')]
+        assert types == [
+            'COSE_Sign', 'COSE_Sign1', 'COSE_Encrypt', 'COSE_Encrypt0',
+            'COSE_Mac', 'COSE_Mac0', 'COSE_Sign1', 'COSE_Mac0',
+            'COSE_Encrypt0', 'COSE_Key', 'COSE_KeySet', 'COSE_Sign1',
+        ]
+
+    def test_cose_amqp_without_media_info(self, cmd_tshark, capture_file, test_env):
+        '''An AMQP content body with the content type application/cose
+        calls the media type dissector without media information; the
+        tagged COSE_Sign1 is dissected (tshark crashed before "COSE: Do
+        not crash without media information, do not leak a header key").'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cose_coverage.pcap.gz'),
+                '-Y', 'frame.number == 33',
+                '-V', '-O', 'amqp,cose',
+            ), encoding='utf-8', env=test_env)
+        lines = [l.strip() for l in stdout.splitlines()]
+        start = lines.index('CBOR Object Signing and Encryption: COSE_Sign1')
+        assert lines[start + 1:start + 6] == [
+            'Message type tag: 18',
+            'Protected Headers (bstr): <MISSING>',
+            'Unprotected Headers',
+            'Payload Detached',
+            'Signature: <MISSING>',
+        ]
+
+    def test_cose_headers(self, cmd_tshark, capture_file, test_env):
+        '''Header parameters: algorithms by number and name, kid shown as
+        text, content types, x5u and the certificates of x5chain and
+        x5bag.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cose_coverage.pcap.gz'),
+                '-Y', 'cose',
+                '-Tfields', '-Eoccurrence=a', '-eframe.number',
+                '-ecose.alg.int', '-ecose.alg.tstr', '-ecose.kid.as_text',
+                '-ecose.content-type.tstr', '-ecose.x5u',
+                '-ex509sat.uTF8String',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines()[0:10] == [
+            '4\t-7,-16,-35\tES256,SHA-256\tbody-kid,11\t'
+            'application/cbor,application/cbor\t'
+            'https://example.com/chain.pem,coap://example.com/s\t'
+            'ca.example,leaf.example,ca.example,ca.example,ca.example,'
+            'ca.example,ca.example,leaf.example',
+            '6\t-8\t\ttext-label-kid\t\t\tca.example,leaf.example',
+            '8\t1,-29,-3,-27\t\touter,inner,static-kid\t\t\t',
+            '10\t24\t\t\ttext/plain\t\t',
+            '12\t4,-6\t\tmac-key\t\t\t',
+            '14\t\tHS256\t\t\t\t',
+            '16\t-8\t\ttext-label-kid\t\t\tca.example,leaf.example',
+            '18\t\tHS256\t\t\t\t',
+            '20\t24\t\t\ttext/plain\t\t',
+            '22\t-8\t\t\t\t\t',
+        ]
+
+    def test_cose_keys(self, cmd_tshark, capture_file, test_env):
+        '''Key parameters depend on the key type (the principal of the
+        key's header map): label -3 is y for EC2 and d for OKP.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cose_coverage.pcap.gz'),
+                '-Y', 'frame.number in {8, 22, 24}',
+                '-Tfields', '-Eoccurrence=a', '-eframe.number',
+                '-ecose.kty.int', '-ecose.kty.tstr', '-ecose.crv.int',
+                '-ecose.crv.tstr', '-ecose.keyops.int', '-ecose.keyops.tstr',
+                '-ecose.kid.as_text',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '8\t2,1\t\t1,4\t\t\t\touter,inner,static-kid',
+            '22\t1\t\t6\t\t1,2\tsign\t',
+            '24\t2,2,2,3,4,5,6,7\tOKP\t1,2\tP-256\t9,10\tMAC create\tno-kty',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cose_coverage.pcap.gz'),
+                '-Y', 'frame.number == 24',
+                '-V', '-O', 'cose',
+            ), encoding='utf-8', env=test_env)
+        lines = [l.strip() for l in stdout.splitlines()]
+        assert lines.count('Label: y (-3)') == 3
+        assert lines.count('Label: d (-4)') == 1
+        assert 'Label: d (-3)' not in lines
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cose_coverage.pcap.gz'),
+                '-Y', 'frame.number == 22',
+                '-V', '-O', 'cose',
+            ), encoding='utf-8', env=test_env)
+        lines = [l.strip() for l in stdout.splitlines()]
+        assert 'Label: d (-3)' in lines
+        assert 'Label: y (-3)' not in lines
