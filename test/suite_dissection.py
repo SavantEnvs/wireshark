@@ -31064,3 +31064,150 @@ class TestDissectDaap:
         assert lines[2].startswith('28\tDAAP\t0x00000101,0x00000102,0x00000103,0x00000099,0x0000009a\t\t3,3\t')
         assert lines[3] == '64\tDAAP\t\t\t\t\t\t1'
         assert lines[4] == '73\tDAAP\t\t\t\t0x00000020\t0x00000101\t'
+
+
+class TestDissectDap:
+    def test_dap_protocols(self, cmd_tshark, capture_file, test_env):
+        '''The frame counts per protocol; no malformed packets and no
+        expert infos of warning or error severity in one and two passes,
+        except the BER warning for the missing name in frame 26.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dap_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 128
+        assert protocols.count('DAP') == 116
+        assert protocols.count('ACSE') == 4
+        assert protocols.count('COTP') == 2
+        assert protocols.count('TCP') == 6
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('dap_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= "Warning"',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.split() == ['26']
+
+    def test_dap_simple_credentials_without_name(self, cmd_tshark, capture_file, test_env):
+        '''A SimpleCredentials without the (mandatory) name has no DN;
+        the Info column used to get "%s" with NULL ("(null)").'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dap_coverage.pcap.gz'),
+                '-Y', 'frame.number == 26',
+                '-Tfields', '-e_ws.col.info', '-edap.credentials',
+                '-e_ws.expert.message',
+            ), encoding='utf-8', env=test_env)
+        info, credentials, expert = stdout.rstrip('\n').split('\t')
+        assert info == 'directoryBind_argument '
+        assert credentials == '0'
+        assert expert.startswith('BER Error: Wrong field in SEQUENCE')
+
+    def test_dap_info(self, cmd_tshark, capture_file, test_env):
+        '''Bind arguments, results and errors (anonymous, the DN of
+        simple credentials, the problems) and the errors of operations.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dap_coverage.pcap.gz'),
+                '-Y', 'frame.number in {8..27} || (frame.number in {88..123} && frame.number % 2 == 1)',
+                '-Tfields', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        alice = 'id-at-commonName=Alice Smith,id-at-organizationalUnitName=People,id-at-organizationName=Example Org,id-at-countryName=AU'
+        org = 'id-at-organizationName=Example Org,id-at-countryName=AU'
+        assert stdout.splitlines() == [
+            'directoryBind_argument ' + alice,
+            'directoryBind_result',
+            'directoryBind_argument id-at-commonName=Bob Jones,id-at-organizationalUnitName=People,' + org,
+            'directoryBind_result anonymous',
+            'directoryBind_argument',
+            'directoryBind_result',
+            'directoryBind_argument',
+            'directoryBindError busy',
+            'directoryBind_argument ',
+            'directoryBindError invalidCredentials',
+            'directoryBind_argument anonymous',
+            'directoryBindError ServiceProblem(99)',
+            'directoryBind_argument id-at-commonName=admin,' + org,
+            'directoryBindError SecurityProblem(99)',
+            'directoryBind_argument id-at-commonName=admin,' + org,
+            'directoryBindError blockedCredentials',
+            'directoryBind_argument',
+            'directoryBind_result',
+            'directoryBind_argument ',
+            'directoryBind_result id-at-commonName=dsa-1,' + org,
+            'abandoned',
+            'abandoned',
+            'abandonFailed',
+            'abandonFailed',
+            'attributeError ' + alice,
+            'attributeError ' + alice,
+            'nameError ' + org,
+            'nameError (root)',
+            'referral',
+            'referral',
+            'serviceError busy',
+            'serviceError saslBindInProgress',
+            'serviceError ServiceProblem(99)',
+            'serviceError timeLimitExceeded',
+            'updateError entryAlreadyExists',
+            'updateError familyRuleViolation',
+            'updateError UpdateProblem(99)',
+            'updateError namingViolation',
+        ]
+
+    def test_dap_operations(self, cmd_tshark, capture_file, test_env):
+        '''Every operation is invoked and answered two to five times
+        (unsigned and signed arguments and results).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dap_coverage.pcap.gz'),
+                '-Y', 'frame.number in {28..87}',
+                '-Tfields', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        ops = [l.split(' ')[0] for l in stdout.splitlines()]
+        expected = []
+        for op, n in (('read', 3), ('compare', 2), ('abandon', 3), ('list', 4),
+                      ('search', 5), ('addEntry', 3), ('removeEntry', 3),
+                      ('modifyEntry', 3), ('modifyDN', 3)):
+            expected += [op + '_argument', op + '_result'] * n
+            if op == 'search':
+                expected += ['search_argument', 'serviceError']
+        assert ops == expected
+
+    def test_dap_values(self, cmd_tshark, capture_file, test_env):
+        '''Partial outcome qualifiers, search subsets, query references
+        and the items of a filter.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dap_coverage.pcap.gz'),
+                '-Y', 'dap.partialOutcomeQualifier_element',
+                '-Tfields', '-eframe.number', '-edap.limitProblem',
+                '-edap.entryCount', '-edap.bestEstimate', '-edap.lowEstimate',
+                '-edap.exact',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '45\t1\t7\t42\t\t',
+            '49\t\t8\t\t3\t',
+            '53\t1\t9\t\t\t42',
+            '57\t0\t\t\t\t',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dap_coverage.pcap.gz'),
+                '-Y', 'dap.subset',
+                '-Tfields', '-eframe.number', '-edap.subset',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == ['52\t2', '54\t1', '56\t0', '58\t7']
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dap_coverage.pcap.gz'),
+                '-Y', 'frame.number in {46,48}',
+                '-V', '-O', 'dap',
+            ), encoding='utf-8', env=test_env)
+        refs = [l.strip() for l in stdout.splitlines() if 'queryReference:' in l]
+        assert refs == ['queryReference: 636f6f6b69652d31 (cookie-1)',
+                        'queryReference: 0001feff']
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('dap_coverage.pcap.gz'),
+                '-Y', 'frame.number == 52',
+                '-Tfields', '-edap.filter_item',
+            ), encoding='utf-8', env=test_env)
+        # equality, substrings, >=, <=, present, approximate, extensible,
+        # context present; then the present items of the extended filter
+        # and the join filter
+        assert stdout.strip().split(',') == ['0', '1', '2', '3', '4', '5', '6', '7', '4', '4']
