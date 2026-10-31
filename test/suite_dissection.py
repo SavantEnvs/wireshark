@@ -28723,3 +28723,62 @@ class TestDissectCops:
                 '-Tfields', '-eframe.number',
             ), encoding='utf-8', env=test_env)
         assert count_output(stdout) == 0
+
+
+TOTEMNET_KEYS = ('-o', 'corosync_totemnet.private_keys:wrongkey;secret;other key')
+
+
+class TestDissectCorosyncTotemnet:
+    def test_corosync_totemnet_protocols(self, cmd_tshark, capture_file, test_env):
+        '''With the keys, every packet decrypts or is plain Totem SRP,
+        without malformed packets or error expert infos, in one and two
+        passes.'''
+        stdout = subprocess.check_output((cmd_tshark, *TOTEMNET_KEYS,
+                '-r', capture_file('corosync_totemnet_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.split() == ['COROSYNC/TOTEMSRP'] * 10
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *TOTEMNET_KEYS, *passes,
+                    '-r', capture_file('corosync_totemnet_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity == error',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_corosync_totemnet_no_keys(self, cmd_tshark, capture_file, test_env):
+        '''Without keys only the plain packets are Totem SRP.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('corosync_totemnet_coverage.pcap.gz'),
+                '-Y', 'corosync_totemsrp',
+                '-Tfields', '-eframe.number',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.split() == ['1', '8', '9']
+
+    def test_corosync_totemnet_decryption(self, cmd_tshark, capture_file, test_env):
+        '''SOBER-128 decryption with each key, with and without the
+        crypto type octet (the key is shown only with it), after a packet
+        with the same or another key, and the Totem SRP message inside,
+        in one and two passes.'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *TOTEMNET_KEYS, *passes,
+                    '-r', capture_file('corosync_totemnet_coverage.pcap.gz'),
+                    '-Tfields', '-eframe.number',
+                    '-ecorosync_totemnet.security_header_salt',
+                    '-ecorosync_totemnet.security_crypto_key',
+                    '-ecorosync_totemsrp.message_header.type',
+                    '-ecorosync_totemsrp.message_header.nodeid',
+                    '-ecorosync_totemsrp.mcast.seq',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.splitlines() == [
+                '1\t\t\t0\t1\t',
+                '2\t202122232425262728292a2b2c2d2e2f\tsecret\t0\t2\t',
+                '3\t303132333435363738393a3b3c3d3e3f\tsecret\t1\t1\t22',
+                '4\t404142434445464748494a4b4c4d4e4f\t\t1\t2\t23',
+                '5\t505152535455565758595a5b5c5d5e5f\tother key\t3\t3\t',
+                '6\t606162636465666768696a6b6c6d6e6f\tother key\t4\t1\t',
+                '7\t707172737475767778797a7b7c7d7e7f\tsecret\t1,1\t2,3\t24,19',
+                '8\t\t\t2\t3\t',
+                '9\t\t\t5\t2\t',
+                '10\ta0a1a2a3a4a5a6a7a8a9aaabacadaeaf\t\t0\t1\t',
+            ]
