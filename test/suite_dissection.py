@@ -30959,3 +30959,108 @@ class TestDissectCvspserver:
         lines = stdout.splitlines()
         assert 'CVS pserver Request' in lines
         assert 'CVS pserver Response' in lines
+
+
+class TestDissectDaap:
+    def test_daap_protocols(self, cmd_tshark, capture_file, test_env):
+        '''The DAAP responses and DMAP request bodies are decoded and none
+        is malformed or has an error, in one and two passes. The only
+        expert info is the warning of the nesting limit in frame 97.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('daap_coverage.pcap.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 107
+        assert protocols.count('DAAP') == 26
+        assert protocols.count('HTTP') == 24
+        assert protocols.count('TCP') == 57
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('daap_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= error',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('daap_coverage.pcap.gz'),
+                    '-Y', 'daap.max_recursion_depth_reached',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.split() == ['97']
+
+    def test_daap_many_containers(self, cmd_tshark, capture_file, test_env):
+        '''A listing of 120 items, nested only three deep, is decoded in
+        full without reaching the nesting limit (before "DAAP: Count only
+        the nesting of containers towards the depth limit" every item
+        after the 97th showed the warning and was not decoded).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('daap_coverage.pcap.gz'),
+                '-Y', 'frame.number == 100',
+                '-Tfields', '-edaap.data_string',
+                '-edaap.max_recursion_depth_reached',
+            ), encoding='utf-8', env=test_env)
+        names, depth = stdout.rstrip('\n').split('\t')
+        assert names.split(',') == ['x'] * 120
+        assert depth == ''
+
+    def test_daap_info(self, cmd_tshark, capture_file, test_env):
+        '''The Info column names the first tag and its size.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('daap_coverage.pcap.gz'),
+                '-Y', 'daap',
+                '-Tfields', '-eframe.number', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '5\tDAAP Response [first tag: msrv, size: 196]',
+            '8\tDAAP Response [first tag: mccr, size: 162]',
+            '11\tDAAP Response [first tag: mlog, size: 24]',
+            '14\tDAAP Response [first tag: mupd, size: 33]',
+            '17\tDAAP Response [first tag: avdb, size: 128]',
+            '28\tDAAP Response [first tag: adbs, size: 4060]',
+            '31\tDAAP Response [first tag: aply, size: 264]',
+            '34\tDAAP Response [first tag: apso, size: 94]',
+            '43\tDAAP Response [first tag: abro, size: 101]',
+            '46\tDAAP Response [first tag: abro, size: 76]',
+            '49\tDAAP Response [first tag: abro, size: 79]',
+            '52\tDAAP Response [first tag: abro, size: 93]',
+            '55\tDAAP Response [first tag: arsv, size: 56]',
+            '58\tDAAP Response [first tag: mlog, size: 29]',
+            '73\tDAAP Response [first tag: cmst, size: 198]',
+            '76\tDAAP Response [first tag: cmgt, size: 24]',
+            '79\tDAAP Response [first tag: casp, size: 124]',
+            '81\tDAAP Response [first tag: medc, size: 49]',
+            '82\tDAAP Response [first tag: medc, size: 24]',
+            '84\tDAAP Response [first tag: mbcl, size: 41]',
+            '85\tDAAP Response [first tag: mcon, size: 24]',
+            '94\tDAAP Response [first tag: adbs, size: 20]',
+            '97\tDAAP Response [first tag: abgn, size: 967]',
+            '100\tDAAP Response [first tag: mlcl, size: 2040]',
+            '103\tDAAP Response [first tag: adbs, size: 25]',
+        ]
+
+    def test_daap_values(self, cmd_tshark, capture_file, test_env):
+        '''Versions, booleans, ids, revision, the song listing reassembled
+        from three TCP segments, now playing, and album art handed to
+        PNG.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('daap_coverage.pcap.gz'),
+                '-Y', 'frame.number == 5',
+                '-V', '-O', 'daap',
+            ), encoding='utf-8', env=test_env)
+        assert 'Tag: protocol version (mpro), 4 bytes; Version: 0.2.0.10' in stdout
+        assert 'Tag: login required (mslr), 1 byte ; Data: True' in stdout
+        assert 'Timeout (seconds): 1800' in stdout
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('daap_coverage.pcap.gz'),
+                '-Y', 'frame.number in {11, 14, 28, 64, 73}',
+                '-Tfields', '-eframe.number', '-e_ws.col.protocol',
+                '-edaap.id', '-edaap.revision', '-edaap.count',
+                '-edaap.playlist_id', '-edaap.track_id', '-epng.ihdr.width',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert lines[0] == '11\tDAAP\t0x1234abcd\t\t\t\t\t'
+        assert lines[1] == '14\tDAAP\t\t42\t\t\t\t'
+        assert lines[2].startswith('28\tDAAP\t0x00000101,0x00000102,0x00000103,0x00000099,0x0000009a\t\t3,3\t')
+        assert lines[3] == '64\tDAAP\t\t\t\t\t\t1'
+        assert lines[4] == '73\tDAAP\t\t\t\t0x00000020\t0x00000101\t'
