@@ -30495,3 +30495,139 @@ class TestDissectCsmEncaps:
         assert params[6].split(',') == ['0x%04x' % v for v in range(0x129, 0x17d)]
         assert lines[11] == '12\t88\t0x0100\t0x0101\t0x0102\t0x0128\t'
         assert lines[12] == '13\t10\t0x0000\t0x0009\t\t\t'
+
+
+class TestDissectCsn1:
+    def test_csn1_protocols(self, cmd_tshark, capture_file, test_env):
+        '''GSM RLC/MAC and GMR-1 BCCH messages decoded with the CSN.1
+        library: no malformed packets or errors in one and two passes,
+        and warnings only for the reproducer frames 183-185.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csn1_coverage.pcapng.gz'),
+                '-Tfields', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.splitlines()
+        assert len(protocols) == 185
+        assert protocols.count('GSM RLC/MAC') == 139
+        assert protocols.count('GSMTAP') == 44
+        assert protocols.count('LTE RRC DL_DCCH') == 2
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csn1_coverage.pcapng.gz'),
+                '-Y', 'gmr1.bcch',
+                '-Tfields', '-eframe.number',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.split() == [str(n) for n in range(133, 177)]
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('csn1_coverage.pcapng.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= error',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('csn1_coverage.pcapng.gz'),
+                    '-Y', '_ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.split() == ['183', '184', '185']
+
+    def test_csn1_message_types(self, cmd_tshark, capture_file, test_env):
+        '''Every uplink and EC-GSM-IoT message type, and all but one
+        downlink message type (Packet Queueing Notification).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csn1_coverage.pcapng.gz'),
+                '-Y', 'frame.number <= 132',
+                '-Tfields', '-egsm_rlcmac.ul.message_type',
+                '-egsm_rlcmac.ul.ec_message_type',
+                '-egsm_rlcmac.dl.ec_message_type',
+                '-E', 'occurrence=f',
+            ), encoding='utf-8', env=test_env)
+        ul, ec_ul, ec_dl = set(), set(), set()
+        for line in stdout.splitlines():
+            a, b, c = line.split('\t')
+            ul.update([int(a)] if a else [])
+            ec_ul.update([int(b)] if b else [])
+            ec_dl.update([int(c)] if c else [])
+        # Packet Pause (9) has no MAC header in its CSN.1 description and
+        # shows its payload type as a 2 bit downlink message type.
+        assert ul == set(range(14)) - {9}
+        assert ec_ul == {1, 2}
+        assert ec_dl == {1, 2, 3, 4, 5, 6, 7, 17, 18}
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csn1_coverage.pcapng.gz'),
+                '-Y', 'frame.number <= 58',
+                '-Tfields', '-egsm_rlcmac.dl.message_type',
+                '-E', 'occurrence=f',
+            ), encoding='utf-8', env=test_env)
+        dl = set(int(v) for v in stdout.split())
+        assert dl == {0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x08, 0x09, 0x0a,
+                      0x0b, 0x0c, 0x0d, 0x15, 0x16, 0x21, 0x22, 0x23, 0x24,
+                      0x25, 0x31, 0x32, 0x33, 0x36, 0x37}
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csn1_coverage.pcapng.gz'),
+                '-Y', 'frame.number in {59..84}',
+                '-Tfields', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert 'GPRS UL CTRL: PACKET_PAUSE' in stdout.splitlines()
+
+    def test_csn1_gmr1_segments(self, cmd_tshark, capture_file, test_env):
+        '''Every GMR-1 System Information 1 and 2 segment type (CSN.1
+        choices with kept bits and labelled types).'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csn1_coverage.pcapng.gz'),
+                '-Y', 'gmr1.bcch',
+                '-Tfields', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        segments = set(stdout.splitlines())
+        assert len(segments) == 30
+        assert '(BCCH) System Information 1: Segment 1A, Segment 4H' in segments
+        assert '(BCCH) System Information 2: Segment 3J' in segments
+
+    def test_csn1_end_of_content(self, cmd_tshark, capture_file, test_env):
+        '''MS RA capability Content limited by its length: an exist bit
+        that is the last bit is stored as 0 when only nullable members
+        follow (frame 177), and kept when one is not (frame 178); the
+        members behind the end are "NULL data".'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csn1_coverage.pcapng.gz'),
+                '-Y', 'frame.number in {177..179}',
+                '-Tfields', '-eframe.number', '-egsm_rlcmac.content_dissector',
+                '-egsm_rlcmac.ul.rf_power_capability',
+                '-egsm_rlcmac.ul.a5_bits_exist',
+                '-egsm_rlcmac.ul.multislot_capability_exist',
+                '-ecsn1.null_data',
+            ), encoding='utf-8', env=test_env)
+        lines = [l.split('\t') for l in stdout.splitlines()]
+        assert [l[:5] for l in lines] == [
+            ['177', '4', '5', '1', ''],
+            ['178', '9', '3', '0', '1'],
+            ['179', '18', '4', '1', '0'],
+        ]
+        assert [len(l[5].split(',')) for l in lines] == [30, 26, 25]
+
+    def test_csn1_var_tarray_limit(self, cmd_tshark, capture_file, test_env):
+        '''Variable arrays whose element count comes from the packet: the
+        largest counts the arrays hold (9 EXT, 6 NC, 6 3G measurements)
+        decode (frames 180-182); the counts of the reproducer
+        csn1_var_tarray_overflow.py (31, 7, 8) are refused before any
+        element is stored (frames 183-185), as fixed in "CSN.1: Do not
+        write more elements than a variable array holds".'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('csn1_coverage.pcapng.gz'),
+                '-Y', 'frame.number >= 180',
+                '-Tfields', '-eframe.number',
+                '-egsm_rlcmac.ul.number_of_ext_measurements',
+                '-egsm_rlcmac.ul.number_of_nc_measurements',
+                '-egsm_rlcmac.ul.pmr_additionsr99_n_3g',
+                '-egsm_rlcmac.ul.frequency_n',
+                '-egsm_rlcmac.ul.measurements_3g_cell_list_index_3g',
+                '-e_ws.expert.message',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '180\t9\t\t\t0,1,2,3,4,5,6,7,8\t\t',
+            '181\t\t6\t\t0,1,2,3,4,5\t\t',
+            '182\t\t0\t6\t\t0,1,2,3,4,5\t',
+            '183\t31\t\t\t\t\tSTREAM NOT SUPPORTED (EXT_Measurements)',
+            '184\t\t7\t\t\t\tSTREAM NOT SUPPORTED (NC_Measurements)',
+            '185\t\t0\t8\t\t\tSTREAM NOT SUPPORTED (Measurements_3G)',
+        ]
