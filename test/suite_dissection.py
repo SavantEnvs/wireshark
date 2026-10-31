@@ -30207,3 +30207,98 @@ class TestDissectCql:
             '157\tv5 C->S Type OPTIONS\t\t\t9',
             '158\tv5 S->C Type SUPPORTED\t\t\t11',
         ]
+
+
+class TestDissectCredssp:
+    def test_credssp_protocols(self, cmd_tshark, capture_file, test_env):
+        '''34 frames are CredSSP (by name, over the TLS heuristic, the RDP
+        heuristic and TPKT), 6 are rejected by the heuristic, and none is
+        malformed or has a warning or error, in one and two passes.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('credssp_coverage.pcap.gz'),
+                '-Tfields', '-eframe.protocols',
+            ), encoding='utf-8', env=test_env)
+        protocols = stdout.split()
+        assert len(protocols) == 40
+        assert sum(1 for p in protocols if ':credssp' in p) == 34
+        assert protocols.count('exported_pdu:rdp:credssp:gss-api:ntlmssp') == 1
+        assert protocols.count('exported_pdu:tpkt:rdp:credssp:gss-api:ntlmssp') == 1
+        assert protocols.count('exported_pdu:data') == 6
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('credssp_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_credssp_versions(self, cmd_tshark, capture_file, test_env):
+        '''The version, credential type and errorCode of every TSRequest.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('credssp_coverage.pcap.gz'),
+                '-Y', 'credssp',
+                '-Tfields', '-eframe.number', '-ecredssp.version',
+                '-ecredssp.credType', '-ecredssp.errorCode',
+            ), encoding='utf-8', env=test_env)
+        lines = [' '.join(l.split()) for l in stdout.splitlines()]
+        assert lines == (
+            ['%d 6' % n for n in range(1, 5)] + ['5 6 1']
+            + ['%d 6' % n for n in range(6, 10)] + ['10 6 2', '11 6 2']
+            + ['%d 6' % n for n in range(12, 16)] + ['16 6 6', '17 6 6', '18 6 6']
+            + ['%d 4' % n for n in range(19, 23)] + ['23 4 4', '24 4 -1073741715']
+            + ['%d 2' % n for n in range(25, 30)] + ['30 6 -2146893562', '31 6', '32 6',
+                                                     '33 3', '34 98'])
+
+    def test_credssp_decrypted(self, cmd_tshark, capture_file, test_env):
+        '''pubKeyAuth and authInfo are decrypted with the keys of the
+        anonymous NTLMSSP exchange: the version 2 and 4 public keys, the
+        password and smart card credentials.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('credssp_coverage.pcap.gz'),
+                '-Y', 'frame.number in {5, 10, 11, 27}',
+                '-Tfields', '-eframe.number', '-ecredssp.decr_PublicKeyAuth',
+                '-ecredssp.domainName', '-ecredssp.userName', '-ecredssp.password',
+                '-ecredssp.keySpec', '-ecredssp.pin',
+            ), encoding='utf-8', env=test_env)
+        lines = [l.split('\t') for l in stdout.splitlines()]
+        assert lines[0] == ['5', '', 'EXAMPLE'.encode('utf-16-le').hex(),
+                            'alice'.encode('utf-16-le').hex(),
+                            'Secr3t!'.encode('utf-16-le').hex(), '', '']
+        assert lines[1][5:] == ['1', '123456'.encode('utf-16-le').hex()]
+        assert lines[2][5:] == ['2', '0000'.encode('utf-16-le').hex()]
+        assert lines[3][:2] == ['27',
+            '3027300d06092a864886f70d01010105000316003013020c00c0ffee00000000000000050203010001']
+
+    def test_credssp_remote_guard(self, cmd_tshark, capture_file, test_env):
+        '''The credential buffers of Remote Credential Guard packages are
+        decoded with the package named in the same TSRequest. Frame 18
+        names only "Negotiate"; before "CredSSP: Do not hand a missing
+        authInfo or pubKeyAuth to GSS-API" the NTLM package of frame 17
+        was kept and its buffer was decoded as an NTLM supplemental
+        credential. Run with -2 as well.'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('credssp_coverage.pcap.gz'),
+                    '-Y', 'credssp.TSRemoteGuardCreds',
+                    '-Tfields', '-eframe.number', '-ecredssp.packageName',
+                    '-ekerberos.KERB_TICKET_LOGON.ServiceTicketLength',
+                    '-entlmssp.NTLM_REMOTE_SUPPLEMENTAL_CREDENTIAL.Flags',
+                    '-ekerberos.SNameString',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.splitlines() == [
+                '16\tKerberos,NTLM,Kerberos,CloudAP\t115,0\t0x00000002\tTERMSRV,rdp.example.test',
+                '17\tNTLM\t\t0x00000002\t',
+                '18\tNegotiate\t\t\t',
+            ]
+
+    def test_credssp_heuristic(self, cmd_tshark, capture_file, test_env):
+        '''The TLS heuristic takes versions 2-98 in a one octet INTEGER in
+        [0] of a SEQUENCE, and rejects the rest.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('credssp_coverage.pcap.gz'),
+                '-Y', 'frame.number >= 32',
+                '-Tfields', '-eframe.number', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        assert [' '.join(l.split()) for l in stdout.splitlines()] == [
+            '32 CredSSP', '33 CredSSP', '34 CredSSP',
+            '35', '36', '37', '38', '39', '40']
