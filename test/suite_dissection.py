@@ -29809,3 +29809,105 @@ class TestDissectCp2179:
             '35\t1\t2\t1,2\t13,23\t30,59\t1000,-1000,7,-7',
             '37\t0\t0\t\t\t\t',
         ]
+
+
+class TestDissectCpfi:
+    # CPFI needs Ethernet addresses, which UDP/IP never has: reach it with
+    # User 0 (DLT 147), a 14 octet Ethernet header and the cpfi payload.
+    user_dlt = 'uat:user_dlts:"User 0 (DLT=147)","cpfi","14","eth_withoutfcs","0",""'
+
+    def test_cpfi_protocols(self, cmd_tshark, capture_file, test_env):
+        '''14 frames are CPFI and none is malformed or has an expert
+        info, in one and two passes.'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cpfi_coverage.pcapng.gz'),
+                    '-o', self.user_dlt,
+                    '-Tfields', '-eframe.number', '-ecpfi.frmtype',
+                ), encoding='utf-8', env=test_env)
+            lines = stdout.splitlines()
+            assert len(lines) == 18
+            assert [l.split('\t')[0] for l in lines if l.split('\t')[1]] == \
+                [str(n) for n in list(range(3, 16)) + [18]]
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('cpfi_coverage.pcapng.gz'),
+                    '-o', self.user_dlt,
+                    '-Y', '_ws.malformed || _ws.expert',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_cpfi_not_on_udp(self, cmd_tshark, capture_file, test_env):
+        '''CPFI on UDP ports 5000 and 5001 is not dissected (the
+        addresses are IPv4, not Ethernet), and without the DLT_USER entry
+        no frame is CPFI.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cpfi_coverage.pcapng.gz'),
+                '-Y', 'udp || cpfi',
+                '-Tfields', '-eframe.number', '-eudp.dstport', '-e_ws.col.protocol',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == ['1\t5000\tUDP', '2\t5001\tUDP']
+
+    def test_cpfi_info(self, cmd_tshark, capture_file, test_env):
+        '''Source and destination ("instance.board.port" or " CPFI" for a
+        TIO card) and the arrow, which moves to keep the lower endpoint on
+        the left, or always points right with arrow_ctl off.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cpfi_coverage.pcapng.gz'),
+                '-o', self.user_dlt,
+                '-Y', 'frame.number >= 3 && frame.number <= 9',
+                '-Tfields', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert [l.split(']')[0] + ']' for l in stdout.splitlines()] == [
+            '[2.1.1 --> 5.2.2]',
+            '[2.1.1 <-- 5.2.2]',
+            '[ CPFI --> 5.3.4]',
+            '[ CPFI <-- 2.3.4]',
+            '[ CPFI -->  CPFI]',
+            '[2.5.6 --> 5.4.5]',
+            '[2.5.6 <-- 5.4.5]',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cpfi_coverage.pcapng.gz'),
+                '-o', self.user_dlt, '-o', 'cpfi.arrow_ctl:FALSE',
+                '-Y', 'frame.number >= 3 && frame.number <= 9',
+                '-Tfields', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert [l.split(']')[0] + ']' for l in stdout.splitlines()] == [
+            '[2.1.1 --> 5.2.2]',
+            '[5.2.2 --> 2.1.1]',
+            '[ CPFI --> 5.3.4]',
+            '[2.3.4 -->  CPFI]',
+            '[ CPFI -->  CPFI]',
+            '[2.5.6 --> 5.4.5]',
+            '[5.4.5 --> 2.5.6]',
+        ]
+
+    def test_cpfi_fields(self, cmd_tshark, capture_file, test_env):
+        '''Header word 1 fields, the hidden instance/board/port items of
+        the TDAs below the TIO cards, and the footer.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('cpfi_coverage.pcapng.gz'),
+                '-o', self.user_dlt, '-Y', 'cpfi',
+                '-Tfields', '-eframe.number', '-ecpfi.srcTDA', '-ecpfi.dstTDA',
+                '-ecpfi.SOFtype', '-ecpfi.speed', '-ecpfi.OPMerror',
+                '-ecpfi.fromLCM', '-ecpfi.word_two', '-ecpfi.src_instance',
+                '-ecpfi.src_board', '-ecpfi.src_port', '-ecpfi.dst_instance',
+                '-ecpfi.dst_board', '-ecpfi.dst_port', '-ecpfi.crc-32',
+                '-ecpfi.EOFtype',
+            ), encoding='utf-8', env=test_env)
+        lines = stdout.splitlines()
+        assert lines[0:5] == [
+            '3\t0x00000022\t0x00000011\t0x00000003\t0x00000001\tFalse\tFalse\t0xa5a5a5a5\t02\t01\t01\t05\t02\t02\t0x12345678\t0x00000001',
+            '4\t0x00000011\t0x00000022\t0x00000004\t0x00000002\tTrue\tTrue\t0x00000000\t05\t02\t02\t02\t01\t01\t0x12345678\t0x00000001',
+            '5\t0x00000034\t0x00000380\t0x00000001\t0x00000003\tFalse\tFalse\t0x00000000\t\t\t\t05\t03\t04\t0x12345678\t0x00000000',
+            '6\t0x000003ff\t0x00000034\t0x00000002\t0x00000000\tFalse\tFalse\t0x00000000\t02\t03\t04\t\t\t\t0x12345678\t0x00000002',
+            '7\t0x00000381\t0x000003fe\t0x00000000\t0x00000000\tFalse\tFalse\t0x00000000\t\t\t\t\t\t\t0x12345678\t0x00000003',
+        ]
+        assert [l.split('\t')[3] for l in lines[5:13]] == [
+            '0x%08x' % v for v in (5, 6, 7, 8, 9, 10, 11, 15)]
+        assert [l.split('\t')[15] for l in lines[5:13]] == [
+            '0x%08x' % v for v in (4, 5, 6, 7, 8, 15, 0, 1)]
+        # Frame 18 is cut off before the footer.
+        assert lines[13].startswith('18\t0x00000011\t0x00000022\t0x00000006\t')
+        assert lines[13].endswith('\t\t')
