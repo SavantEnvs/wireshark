@@ -31337,3 +31337,88 @@ class TestDissectDarwin:
             '29\tUnknown\tBSD\tIPv4',
             '31\tIPv6 discard option\tBSD\tIPv6',
         ]
+
+
+class TestDissectData:
+    def test_data_frames(self, cmd_tshark, capture_file, test_env):
+        '''Payloads nobody claims (UDP and TCP on unassigned ports, IP
+        protocol 253, Ethertype 0x88b5) are shown as Data, without malformed
+        packets or warnings, in one and two passes.'''
+        for passes in ((), ('-2',)):
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('data_coverage.pcap.gz'),
+                    '-Tfields', '-eframe.number', '-edata.len',
+                ), encoding='utf-8', env=test_env)
+            assert stdout.splitlines() == [
+                '1\t107', '2\t68', '3\t211', '4\t64', '5\t8', '6\t1', '7\t30',
+                '8\t33', '9\t47', '10\t', '11\t', '12\t', '13\t', '14\t',
+                '15\t43', '16\t',
+            ]
+            stdout = subprocess.check_output((cmd_tshark, *passes,
+                    '-r', capture_file('data_coverage.pcap.gz'),
+                    '-Y', '_ws.malformed || _ws.expert.severity >= warning',
+                    '-Tfields', '-eframe.number',
+                ), encoding='utf-8', env=test_env)
+            assert count_output(stdout) == 0
+
+    def test_data_defaults(self, cmd_tshark, capture_file, test_env):
+        '''By default only the bytes and the length are shown.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('data_coverage.pcap.gz'),
+                '-Y', 'frame.number == 1',
+                '-Tfields', '-edata.data', '-edata.text', '-edata.md5_hash',
+                '-edata.uncompressed.len',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.startswith('53796e746865746963207061796c6f6164')
+        assert stdout.endswith('\t\t\t\n')
+
+    def test_data_text_md5(self, cmd_tshark, capture_file, test_env):
+        '''Show as text puts the text in the tree and the Info column; the
+        MD5 hash is of the payload.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('data_coverage.pcap.gz'),
+                '-o', 'data.show_as_text:TRUE', '-o', 'data.md5_hash:TRUE',
+                '-Y', 'frame.number in {1, 7, 8}',
+                '-Tfields', '-edata.text', '-edata.md5_hash', '-e_ws.col.info',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            'Synthetic payload for the Wireshark data dissector. No dissector '
+            'claims this port, so it is shown as Data.\\n\t'
+            'af53c07e12b8461047533fe17712e983\t'
+            'Synthetic payload for the Wireshark data dissector. No dissector '
+            'claims this port, so it is shown as Data.\\\\n',
+            'Grüße, ℵ₀ — café ☕\\n\t3dc802afa14378f8fdebdb2ed5c90bca\t'
+            'Grüße, ℵ₀ — café ☕\\\\n',
+            'experimental protocol 253 payload\te13aa0ee0982d638b2a1b85ab2e6c691\t'
+            'experimental protocol 253 payload',
+        ]
+
+    def test_data_uncompress(self, cmd_tshark, capture_file, test_env):
+        '''zlib compressed payloads are uncompressed, and shown as text from
+        the uncompressed data; frame 4 is not zlib, frame 5 is an empty
+        zlib stream.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('data_coverage.pcap.gz'),
+                '-o', 'data.uncompress_data:TRUE', '-o', 'data.show_as_text:TRUE',
+                '-Y', 'frame.number in {2, 3, 4, 5, 15}',
+                '-Tfields', '-eframe.number', '-edata.len', '-edata.uncompressed.len',
+            ), encoding='utf-8', env=test_env)
+        assert stdout.splitlines() == [
+            '2\t68\t197', '3\t211\t200', '4\t64\t', '5\t8\t0', '15\t43\t96',
+        ]
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('data_coverage.pcap.gz'),
+                '-o', 'data.uncompress_data:TRUE', '-o', 'data.show_as_text:TRUE',
+                '-Y', 'frame.number == 15',
+                '-Tfields', '-edata.text',
+            ), encoding='utf-8', env=test_env)
+        assert stdout == 'TCP stream payload, compressed. ' * 3 + '\n'
+
+    def test_data_new_pane(self, cmd_tshark, capture_file, test_env):
+        '''The new pane preference adds the payload as a data source.'''
+        stdout = subprocess.check_output((cmd_tshark,
+                '-r', capture_file('data_coverage.pcap.gz'),
+                '-o', 'data.datapref.newpane:TRUE', '-x',
+                '-Y', 'frame.number == 6',
+            ), encoding='utf-8', env=test_env)
+        assert 'Not dissected data bytes (1 byte):' in stdout
