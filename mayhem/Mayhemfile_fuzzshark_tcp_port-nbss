@@ -1,0 +1,6 @@
+project: savantenvs/wireshark
+target: fuzzshark_tcp_port-nbss-mined-e0c23bb
+cmds:
+  - cmd: /mayhem/fuzzshark_tcp_port-nbss
+    libfuzzer: true
+    timeout: 10
